@@ -26,6 +26,10 @@ wheels/
 # Environment variables
 .env
 
+# Database
+birthdays.db
+birthdays.db-journal
+
 # IDE
 .vscode/
 .idea/

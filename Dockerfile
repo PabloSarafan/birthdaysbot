@@ -10,8 +10,10 @@ COPY requirements.txt .
 # Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем код бота и imghdr shim для Python 3.12+
+# Копируем код бота и вспомогательные модули
 COPY bot.py .
+COPY database.py .
+COPY scheduler.py .
 COPY imghdr.py /usr/local/lib/python3.12/
 
 # Запускаем бота
