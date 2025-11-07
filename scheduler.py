@@ -61,7 +61,7 @@ def check_and_send_notifications(bot):
         
         notifications_sent = 0
         
-        for user_id, full_name, birth_date in birthdays:
+        for user_id, full_name, birth_date, telegram_username in birthdays:
             days_until = calculate_days_until_birthday(birth_date)
             
             # Проверяем нужно ли отправить уведомление
@@ -71,15 +71,18 @@ def check_and_send_notifications(bot):
                     birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
                     formatted_date = birth_date_obj.strftime('%d.%m.%Y')
                     
+                    # Формируем имя с username
+                    name_with_username = f"{full_name} (@{telegram_username})" if telegram_username else full_name
+                    
                     # Формируем текст уведомления
                     if days_until == 0:
-                        message = f"🎉 СЕГОДНЯ день рождения у {full_name} ({formatted_date})!\n\nНе забудь поздравить! 🎂🎁"
+                        message = f"🎉 СЕГОДНЯ день рождения у {name_with_username} ({formatted_date})!\n\nНе забудь поздравить! 🎂🎁"
                     elif days_until == 1:
-                        message = f"🎂 Не забудь поздравить {full_name} завтра ({formatted_date})!"
+                        message = f"🎂 Не забудь поздравить {name_with_username} завтра ({formatted_date})!"
                     elif days_until == 3:
-                        message = f"🎂 Не забудь поздравить {full_name} через 3 дня ({formatted_date})!"
+                        message = f"🎂 Не забудь поздравить {name_with_username} через 3 дня ({formatted_date})!"
                     else:  # 7 дней
-                        message = f"🎂 Не забудь поздравить {full_name} через 7 дней ({formatted_date})!"
+                        message = f"🎂 Не забудь поздравить {name_with_username} через 7 дней ({formatted_date})!"
                     
                     # Отправляем уведомление
                     bot.send_message(chat_id=user_id, text=message)

@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, date
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Updater, 
     CommandHandler, 
@@ -25,8 +25,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Состояния для ConversationHandler
-WAITING_NAME, WAITING_DATE = range(2)
-WAITING_DELETE_ID, WAITING_EDIT_ID, WAITING_EDIT_NAME, WAITING_EDIT_DATE = range(2, 6)
+WAITING_NAME, WAITING_DATE, WAITING_USERNAME = range(3)
+WAITING_DELETE_ID, WAITING_EDIT_ID, WAITING_EDIT_NAME, WAITING_EDIT_DATE, WAITING_EDIT_USERNAME = range(3, 8)
 
 
 def start(update: Update, context: CallbackContext) -> None:
@@ -62,7 +62,10 @@ def add_start(update: Update, context: CallbackContext) -> int:
     """Начало диалога добавления дня рождения."""
     update.message.reply_text(
         "📝 Добавление нового дня рождения.\n\n"
-        "Введите ФИО человека (например: Иванов Иван Иванович):\n\n"
+        "Введите имя или ФИО человека (например: Дедушка или Иванов Иван Иванович)\n\n"
+        "💡 На следующих шагах вы сможете указать:\n"
+        "• Дату рождения\n"
+        "• Telegram контакт (для быстрого доступа в уведомлениях)\n\n"
         "Отменить: /cancel"
     )
     return WAITING_NAME
@@ -87,10 +90,8 @@ def add_name(update: Update, context: CallbackContext) -> int:
 
 
 def add_date(update: Update, context: CallbackContext) -> int:
-    """Получение даты и сохранение в базу данных."""
+    """Получение даты и запрос username."""
     date_str = update.message.text.strip()
-    full_name = context.user_data.get('full_name')
-    user_id = update.effective_user.id
     
     # Валидация формата даты
     try:
@@ -104,23 +105,18 @@ def add_date(update: Update, context: CallbackContext) -> int:
             )
             return WAITING_DATE
         
-        # Сохраняем в базу данных в формате YYYY-MM-DD
-        db_date = birth_date.strftime('%Y-%m-%d')
+        # Сохраняем дату в формате YYYY-MM-DD
+        context.user_data['birth_date'] = birth_date.strftime('%Y-%m-%d')
+        context.user_data['formatted_date'] = date_str
         
-        if database.add_birthday(user_id, full_name, db_date):
-            update.message.reply_text(
-                f"✅ Успешно сохранено!\n\n"
-                f"👤 {full_name}\n"
-                f"🎂 {date_str}\n\n"
-                f"Я буду напоминать вам за 7, 3 и 1 день до дня рождения."
-            )
-            logger.info(f"Пользователь {user_id} добавил: {full_name} - {date_str}")
-        else:
-            update.message.reply_text("❌ Ошибка при сохранении. Попробуйте позже.")
-        
-        # Очищаем данные
-        context.user_data.clear()
-        return ConversationHandler.END
+        update.message.reply_text(
+            f"✅ Дата: {date_str}\n\n"
+            "Теперь введите Telegram username этого человека (например: @ivan или ivan)\n\n"
+            "Это поможет быстро найти контакт в уведомлениях.\n"
+            "Если username нет, напишите: нет\n\n"
+            "Отменить: /cancel"
+        )
+        return WAITING_USERNAME
         
     except ValueError:
         update.message.reply_text(
@@ -129,6 +125,49 @@ def add_date(update: Update, context: CallbackContext) -> int:
             "Попробуйте еще раз:"
         )
         return WAITING_DATE
+
+
+def add_username(update: Update, context: CallbackContext) -> int:
+    """Получение username и сохранение в базу данных."""
+    username_input = update.message.text.strip()
+    full_name = context.user_data.get('full_name')
+    birth_date = context.user_data.get('birth_date')
+    formatted_date = context.user_data.get('formatted_date')
+    user_id = update.effective_user.id
+    
+    # Обработка username
+    telegram_username = None
+    if username_input.lower() not in ['нет', 'no', 'skip', '-']:
+        # Убираем @ если есть
+        username_clean = username_input.lstrip('@')
+        
+        # Валидация username (только буквы, цифры и подчеркивание)
+        if username_clean and username_clean.replace('_', '').isalnum():
+            telegram_username = username_clean
+        else:
+            update.message.reply_text(
+                "❌ Неверный формат username.\n"
+                "Username может содержать только буквы, цифры и подчеркивание.\n"
+                "Попробуйте еще раз или напишите 'нет':"
+            )
+            return WAITING_USERNAME
+    
+    # Сохраняем в базу данных
+    if database.add_birthday(user_id, full_name, birth_date, telegram_username):
+        username_text = f" (@{telegram_username})" if telegram_username else ""
+        update.message.reply_text(
+            f"✅ Успешно сохранено!\n\n"
+            f"👤 {full_name}{username_text}\n"
+            f"🎂 {formatted_date}\n\n"
+            f"Я буду напоминать вам за 7, 3 и 1 день до дня рождения."
+        )
+        logger.info(f"Пользователь {user_id} добавил: {full_name}{username_text} - {formatted_date}")
+    else:
+        update.message.reply_text("❌ Ошибка при сохранении. Попробуйте позже.")
+    
+    # Очищаем данные
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 def list_birthdays(update: Update, context: CallbackContext) -> None:
@@ -147,19 +186,20 @@ def list_birthdays(update: Update, context: CallbackContext) -> None:
     today = date.today()
     birthdays_with_days = []
     
-    for birthday_id, full_name, birth_date in birthdays:
+    for birthday_id, full_name, birth_date, telegram_username in birthdays:
         days_until = scheduler.calculate_days_until_birthday(birth_date)
         birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d').date()
-        birthdays_with_days.append((birthday_id, full_name, birth_date_obj, days_until))
+        birthdays_with_days.append((birthday_id, full_name, birth_date_obj, telegram_username, days_until))
     
     # Сортируем по количеству дней до дня рождения
-    birthdays_with_days.sort(key=lambda x: x[3])
+    birthdays_with_days.sort(key=lambda x: x[4])
     
     # Формируем сообщение
     message = "📋 Ваши дни рождения:\n\n"
     
-    for idx, (birthday_id, full_name, birth_date, days_until) in enumerate(birthdays_with_days, 1):
+    for idx, (birthday_id, full_name, birth_date, telegram_username, days_until) in enumerate(birthdays_with_days, 1):
         formatted_date = birth_date.strftime('%d.%m.%Y')
+        username_text = f" (@{telegram_username})" if telegram_username else ""
         
         if days_until == 0:
             days_text = "🎉 СЕГОДНЯ!"
@@ -168,7 +208,7 @@ def list_birthdays(update: Update, context: CallbackContext) -> None:
         else:
             days_text = f"через {days_until} дн."
         
-        message += f"{idx}. {full_name}\n   🎂 {formatted_date} ({days_text})\n\n"
+        message += f"{idx}. {full_name}{username_text}\n   🎂 {formatted_date} ({days_text})\n\n"
     
     message += "Управление: /add /delete /edit"
     update.message.reply_text(message)
@@ -186,10 +226,11 @@ def delete_start(update: Update, context: CallbackContext) -> int:
     # Показываем список
     message = "🗑 Удаление записи\n\nВыберите номер записи для удаления:\n\n"
     
-    for idx, (birthday_id, full_name, birth_date) in enumerate(birthdays, 1):
+    for idx, (birthday_id, full_name, birth_date, telegram_username) in enumerate(birthdays, 1):
         birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
         formatted_date = birth_date_obj.strftime('%d.%m.%Y')
-        message += f"{idx}. {full_name} - {formatted_date}\n"
+        username_text = f" (@{telegram_username})" if telegram_username else ""
+        message += f"{idx}. {full_name}{username_text} - {formatted_date}\n"
     
     message += "\nВведите номер записи или /cancel для отмены:"
     update.message.reply_text(message)
@@ -206,7 +247,7 @@ def delete_execute(update: Update, context: CallbackContext) -> int:
         birthdays = context.user_data.get('birthdays', [])
         
         if 0 <= index < len(birthdays):
-            birthday_id, full_name, birth_date = birthdays[index]
+            birthday_id, full_name, birth_date, telegram_username = birthdays[index]
             user_id = update.effective_user.id
             
             if database.delete_birthday(birthday_id, user_id):
@@ -236,10 +277,11 @@ def edit_start(update: Update, context: CallbackContext) -> int:
     # Показываем список
     message = "✏️ Редактирование записи\n\nВыберите номер записи для редактирования:\n\n"
     
-    for idx, (birthday_id, full_name, birth_date) in enumerate(birthdays, 1):
+    for idx, (birthday_id, full_name, birth_date, telegram_username) in enumerate(birthdays, 1):
         birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
         formatted_date = birth_date_obj.strftime('%d.%m.%Y')
-        message += f"{idx}. {full_name} - {formatted_date}\n"
+        username_text = f" (@{telegram_username})" if telegram_username else ""
+        message += f"{idx}. {full_name}{username_text} - {formatted_date}\n"
     
     message += "\nВведите номер записи или /cancel для отмены:"
     update.message.reply_text(message)
@@ -255,10 +297,11 @@ def edit_id(update: Update, context: CallbackContext) -> int:
         birthdays = context.user_data.get('birthdays', [])
         
         if 0 <= index < len(birthdays):
-            birthday_id, full_name, birth_date = birthdays[index]
+            birthday_id, full_name, birth_date, telegram_username = birthdays[index]
             context.user_data['edit_id'] = birthday_id
             context.user_data['old_name'] = full_name
             context.user_data['old_date'] = birth_date
+            context.user_data['old_username'] = telegram_username
             
             update.message.reply_text(
                 f"Текущее ФИО: {full_name}\n\n"
@@ -298,7 +341,7 @@ def edit_name(update: Update, context: CallbackContext) -> int:
 
 
 def edit_date(update: Update, context: CallbackContext) -> int:
-    """Получение новой даты и обновление записи."""
+    """Получение новой даты и запрос username."""
     date_str = update.message.text.strip()
     
     try:
@@ -308,23 +351,20 @@ def edit_date(update: Update, context: CallbackContext) -> int:
             update.message.reply_text("❌ Дата не может быть в будущем. Попробуйте еще раз:")
             return WAITING_EDIT_DATE
         
-        birthday_id = context.user_data.get('edit_id')
-        new_name = context.user_data.get('new_name')
-        user_id = update.effective_user.id
-        db_date = birth_date.strftime('%Y-%m-%d')
+        context.user_data['new_date'] = birth_date.strftime('%Y-%m-%d')
+        context.user_data['formatted_date'] = date_str
         
-        if database.update_birthday(birthday_id, user_id, new_name, db_date):
-            update.message.reply_text(
-                f"✅ Запись обновлена!\n\n"
-                f"👤 {new_name}\n"
-                f"🎂 {date_str}"
-            )
-            logger.info(f"Пользователь {user_id} обновил запись {birthday_id}")
-        else:
-            update.message.reply_text("❌ Ошибка при обновлении.")
+        old_username = context.user_data.get('old_username')
+        username_info = f" (@{old_username})" if old_username else " (нет)"
         
-        context.user_data.clear()
-        return ConversationHandler.END
+        update.message.reply_text(
+            f"✅ Дата: {date_str}\n\n"
+            f"Текущий username:{username_info}\n\n"
+            f"Введите новый Telegram username (например: @ivan или ivan)\n"
+            f"Если username нет или хотите оставить текущий, напишите: нет\n\n"
+            f"Отменить: /cancel"
+        )
+        return WAITING_EDIT_USERNAME
         
     except ValueError:
         update.message.reply_text(
@@ -332,6 +372,49 @@ def edit_date(update: Update, context: CallbackContext) -> int:
             "Используйте формат ДД.ММ.ГГГГ (например: 15.03.1990):"
         )
         return WAITING_EDIT_DATE
+
+
+def edit_username(update: Update, context: CallbackContext) -> int:
+    """Получение username и обновление записи."""
+    username_input = update.message.text.strip()
+    birthday_id = context.user_data.get('edit_id')
+    new_name = context.user_data.get('new_name')
+    new_date = context.user_data.get('new_date')
+    formatted_date = context.user_data.get('formatted_date')
+    old_username = context.user_data.get('old_username')
+    user_id = update.effective_user.id
+    
+    # Обработка username
+    telegram_username = old_username  # По умолчанию оставляем старый
+    if username_input.lower() not in ['нет', 'no', 'skip', '-']:
+        # Убираем @ если есть
+        username_clean = username_input.lstrip('@')
+        
+        # Валидация username
+        if username_clean and username_clean.replace('_', '').isalnum():
+            telegram_username = username_clean
+        else:
+            update.message.reply_text(
+                "❌ Неверный формат username.\n"
+                "Username может содержать только буквы, цифры и подчеркивание.\n"
+                "Попробуйте еще раз или напишите 'нет':"
+            )
+            return WAITING_EDIT_USERNAME
+    
+    # Обновляем запись
+    if database.update_birthday(birthday_id, user_id, new_name, new_date, telegram_username):
+        username_text = f" (@{telegram_username})" if telegram_username else ""
+        update.message.reply_text(
+            f"✅ Запись обновлена!\n\n"
+            f"👤 {new_name}{username_text}\n"
+            f"🎂 {formatted_date}"
+        )
+        logger.info(f"Пользователь {user_id} обновил запись {birthday_id}")
+    else:
+        update.message.reply_text("❌ Ошибка при обновлении.")
+    
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 def cancel(update: Update, context: CallbackContext) -> int:
@@ -357,6 +440,21 @@ def check_notifications(update: Update, context: CallbackContext) -> None:
     update.message.reply_text("✅ Проверка завершена! Уведомления отправлены если есть подходящие даты.")
 
 
+def setup_commands(bot):
+    """Установить меню команд бота."""
+    commands = [
+        BotCommand("start", "Начать работу с ботом"),
+        BotCommand("add", "Добавить новый день рождения"),
+        BotCommand("list", "Показать все дни рождения"),
+        BotCommand("delete", "Удалить запись"),
+        BotCommand("edit", "Редактировать запись"),
+        BotCommand("check", "Проверить уведомления вручную"),
+        BotCommand("cancel", "Отменить текущую операцию"),
+    ]
+    bot.set_my_commands(commands)
+    logger.info("Меню команд установлено")
+
+
 def main() -> None:
     """Запуск бота."""
     # Получаем токен из переменных окружения
@@ -375,6 +473,9 @@ def main() -> None:
     updater = Updater(token=bot_token, use_context=True)
     dispatcher = updater.dispatcher
     bot = updater.bot
+    
+    # Устанавливаем меню команд
+    setup_commands(bot)
     
     # Запускаем планировщик уведомлений
     logger.info("Запуск планировщика уведомлений...")
@@ -395,6 +496,7 @@ def main() -> None:
         states={
             WAITING_NAME: [MessageHandler(Filters.text & ~Filters.command, add_name)],
             WAITING_DATE: [MessageHandler(Filters.text & ~Filters.command, add_date)],
+            WAITING_USERNAME: [MessageHandler(Filters.text & ~Filters.command, add_username)],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
@@ -417,6 +519,7 @@ def main() -> None:
             WAITING_EDIT_ID: [MessageHandler(Filters.text & ~Filters.command, edit_id)],
             WAITING_EDIT_NAME: [MessageHandler(Filters.text & ~Filters.command, edit_name)],
             WAITING_EDIT_DATE: [MessageHandler(Filters.text & ~Filters.command, edit_date)],
+            WAITING_EDIT_USERNAME: [MessageHandler(Filters.text & ~Filters.command, edit_username)],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )

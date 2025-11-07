@@ -20,6 +20,7 @@ def init_db():
                 user_id INTEGER NOT NULL,
                 full_name TEXT NOT NULL,
                 birth_date TEXT NOT NULL,
+                telegram_username TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -27,12 +28,38 @@ def init_db():
         conn.commit()
         conn.close()
         logger.info("База данных инициализирована успешно")
+        
+        # Выполняем миграцию для существующих баз
+        migrate_add_username()
+        
     except Exception as e:
         logger.error(f"Ошибка при инициализации базы данных: {e}")
         raise
 
 
-def add_birthday(user_id: int, full_name: str, birth_date: str) -> bool:
+def migrate_add_username():
+    """Миграция: добавить колонку telegram_username если её нет."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        # Проверяем существует ли колонка telegram_username
+        cursor.execute("PRAGMA table_info(birthdays)")
+        columns = [column[1] for column in cursor.fetchall()]
+        
+        if 'telegram_username' not in columns:
+            logger.info("Выполняется миграция: добавление колонки telegram_username")
+            cursor.execute('ALTER TABLE birthdays ADD COLUMN telegram_username TEXT')
+            conn.commit()
+            logger.info("Миграция успешно выполнена")
+        
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка при миграции базы данных: {e}")
+        raise
+
+
+def add_birthday(user_id: int, full_name: str, birth_date: str, telegram_username: Optional[str] = None) -> bool:
     """
     Добавить новый день рождения.
     
@@ -40,6 +67,7 @@ def add_birthday(user_id: int, full_name: str, birth_date: str) -> bool:
         user_id: Telegram ID пользователя
         full_name: ФИО человека
         birth_date: Дата рождения в формате YYYY-MM-DD
+        telegram_username: Telegram username (опционально, без @)
     
     Returns:
         True если успешно добавлено, False в случае ошибки
@@ -49,20 +77,21 @@ def add_birthday(user_id: int, full_name: str, birth_date: str) -> bool:
         cursor = conn.cursor()
         
         cursor.execute(
-            'INSERT INTO birthdays (user_id, full_name, birth_date) VALUES (?, ?, ?)',
-            (user_id, full_name, birth_date)
+            'INSERT INTO birthdays (user_id, full_name, birth_date, telegram_username) VALUES (?, ?, ?, ?)',
+            (user_id, full_name, birth_date, telegram_username)
         )
         
         conn.commit()
         conn.close()
-        logger.info(f"Добавлен день рождения: {full_name} ({birth_date}) для пользователя {user_id}")
+        username_info = f" (@{telegram_username})" if telegram_username else ""
+        logger.info(f"Добавлен день рождения: {full_name}{username_info} ({birth_date}) для пользователя {user_id}")
         return True
     except Exception as e:
         logger.error(f"Ошибка при добавлении дня рождения: {e}")
         return False
 
 
-def get_all_birthdays(user_id: int) -> List[Tuple[int, str, str]]:
+def get_all_birthdays(user_id: int) -> List[Tuple[int, str, str, Optional[str]]]:
     """
     Получить все дни рождения для пользователя.
     
@@ -70,14 +99,14 @@ def get_all_birthdays(user_id: int) -> List[Tuple[int, str, str]]:
         user_id: Telegram ID пользователя
     
     Returns:
-        Список кортежей (id, full_name, birth_date)
+        Список кортежей (id, full_name, birth_date, telegram_username)
     """
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
         cursor.execute(
-            'SELECT id, full_name, birth_date FROM birthdays WHERE user_id = ? ORDER BY birth_date',
+            'SELECT id, full_name, birth_date, telegram_username FROM birthdays WHERE user_id = ? ORDER BY birth_date',
             (user_id,)
         )
         
@@ -121,7 +150,7 @@ def delete_birthday(birthday_id: int, user_id: int) -> bool:
         return False
 
 
-def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: str) -> bool:
+def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: str, telegram_username: Optional[str] = None) -> bool:
     """
     Обновить информацию о дне рождения.
     
@@ -130,6 +159,7 @@ def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: 
         user_id: Telegram ID пользователя (для проверки прав)
         full_name: Новое ФИО
         birth_date: Новая дата рождения в формате YYYY-MM-DD
+        telegram_username: Telegram username (опционально, без @)
     
     Returns:
         True если успешно обновлено, False в случае ошибки
@@ -139,8 +169,8 @@ def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: 
         cursor = conn.cursor()
         
         cursor.execute(
-            'UPDATE birthdays SET full_name = ?, birth_date = ? WHERE id = ? AND user_id = ?',
-            (full_name, birth_date, birthday_id, user_id)
+            'UPDATE birthdays SET full_name = ?, birth_date = ?, telegram_username = ? WHERE id = ? AND user_id = ?',
+            (full_name, birth_date, telegram_username, birthday_id, user_id)
         )
         
         updated = cursor.rowcount > 0
@@ -155,18 +185,18 @@ def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: 
         return False
 
 
-def get_all_birthdays_for_notifications() -> List[Tuple[int, str, str]]:
+def get_all_birthdays_for_notifications() -> List[Tuple[int, str, str, Optional[str]]]:
     """
     Получить все дни рождения для отправки уведомлений.
     
     Returns:
-        Список кортежей (user_id, full_name, birth_date)
+        Список кортежей (user_id, full_name, birth_date, telegram_username)
     """
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT user_id, full_name, birth_date FROM birthdays')
+        cursor.execute('SELECT user_id, full_name, birth_date, telegram_username FROM birthdays')
         
         results = cursor.fetchall()
         conn.close()
@@ -176,7 +206,7 @@ def get_all_birthdays_for_notifications() -> List[Tuple[int, str, str]]:
         return []
 
 
-def get_birthday_by_id(birthday_id: int, user_id: int) -> Optional[Tuple[str, str]]:
+def get_birthday_by_id(birthday_id: int, user_id: int) -> Optional[Tuple[str, str, Optional[str]]]:
     """
     Получить информацию о конкретном дне рождения.
     
@@ -185,14 +215,14 @@ def get_birthday_by_id(birthday_id: int, user_id: int) -> Optional[Tuple[str, st
         user_id: Telegram ID пользователя
     
     Returns:
-        Кортеж (full_name, birth_date) или None если не найдено
+        Кортеж (full_name, birth_date, telegram_username) или None если не найдено
     """
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
         cursor.execute(
-            'SELECT full_name, birth_date FROM birthdays WHERE id = ? AND user_id = ?',
+            'SELECT full_name, birth_date, telegram_username FROM birthdays WHERE id = ? AND user_id = ?',
             (birthday_id, user_id)
         )
         
