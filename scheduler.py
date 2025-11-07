@@ -65,17 +65,21 @@ def check_and_send_notifications(bot):
             days_until = calculate_days_until_birthday(birth_date)
             
             # Проверяем нужно ли отправить уведомление
-            if days_until in [1, 3, 7]:
+            if days_until in [0, 1, 3, 7]:
                 try:
                     # Форматируем дату для отображения
                     birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
                     formatted_date = birth_date_obj.strftime('%d.%m.%Y')
                     
                     # Формируем текст уведомления
-                    if days_until == 1:
+                    if days_until == 0:
+                        message = f"🎉 СЕГОДНЯ день рождения у {full_name} ({formatted_date})!\n\nНе забудь поздравить! 🎂🎁"
+                    elif days_until == 1:
                         message = f"🎂 Не забудь поздравить {full_name} завтра ({formatted_date})!"
-                    else:
-                        message = f"🎂 Не забудь поздравить {full_name} через {days_until} дня ({formatted_date})!"
+                    elif days_until == 3:
+                        message = f"🎂 Не забудь поздравить {full_name} через 3 дня ({formatted_date})!"
+                    else:  # 7 дней
+                        message = f"🎂 Не забудь поздравить {full_name} через 7 дней ({formatted_date})!"
                     
                     # Отправляем уведомление
                     bot.send_message(chat_id=user_id, text=message)
