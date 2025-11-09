@@ -40,6 +40,37 @@ def calculate_days_until_birthday(birth_date_str: str) -> int:
         return -1
 
 
+def calculate_age(birth_date_str: str) -> int:
+    """
+    Вычислить текущий возраст человека.
+    
+    Args:
+        birth_date_str: Дата рождения в формате YYYY-MM-DD
+    
+    Returns:
+        Возраст в годах (или -1 если год не указан или ошибка)
+    """
+    try:
+        birth_date = datetime.strptime(birth_date_str, '%Y-%m-%d').date()
+        today = date.today()
+        
+        # Если год 1900 или раньше, считаем что год не указан
+        if birth_date.year <= 1900:
+            return -1
+        
+        # Вычисляем возраст
+        age = today.year - birth_date.year
+        
+        # Проверяем, был ли уже день рождения в этом году
+        if (today.month, today.day) < (birth_date.month, birth_date.day):
+            age -= 1
+        
+        return age
+    except Exception as e:
+        logger.error(f"Ошибка при вычислении возраста: {e}")
+        return -1
+
+
 def check_and_send_notifications(bot):
     """
     Проверить все дни рождения и отправить уведомления.
@@ -61,7 +92,7 @@ def check_and_send_notifications(bot):
         
         notifications_sent = 0
         
-        for user_id, full_name, birth_date, telegram_username in birthdays:
+        for user_id, full_name, birth_date, telegram_username, event_type, event_name in birthdays:
             days_until = calculate_days_until_birthday(birth_date)
             
             # Проверяем нужно ли отправить уведомление
@@ -71,23 +102,64 @@ def check_and_send_notifications(bot):
                     birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
                     formatted_date = birth_date_obj.strftime('%d.%m.%Y')
                     
-                    # Формируем имя с username
+                    # Формируем имя с username (только для дней рождения)
                     name_with_username = f"{full_name} (@{telegram_username})" if telegram_username else full_name
                     
-                    # Формируем текст уведомления
-                    if days_until == 0:
-                        message = f"🎉 СЕГОДНЯ день рождения у {name_with_username} ({formatted_date})!\n\nНе забудь поздравить! 🎂🎁"
-                    elif days_until == 1:
-                        message = f"🎂 Не забудь поздравить {name_with_username} завтра ({formatted_date})!"
-                    elif days_until == 3:
-                        message = f"🎂 Не забудь поздравить {name_with_username} через 3 дня ({formatted_date})!"
-                    else:  # 7 дней
-                        message = f"🎂 Не забудь поздравить {name_with_username} через 7 дней ({formatted_date})!"
+                    # Определяем тип события (по умолчанию день рождения для обратной совместимости)
+                    if not event_type:
+                        event_type = 'birthday'
+                    
+                    # Формируем текст уведомления в зависимости от типа события и дней до события
+                    if event_type == 'birthday':
+                        # Вычисляем возраст если указан год
+                        current_age = calculate_age(birth_date)
+                        
+                        # Для дня рождения сегодня показываем исполняющийся возраст
+                        if days_until == 0:
+                            if current_age > 0:
+                                # Возраст который исполняется сегодня = текущий возраст + 1
+                                age_text = f"\nИсполняется {current_age + 1} лет! "
+                                message = f"🎉 СЕГОДНЯ день рождения у {name_with_username} ({formatted_date})!{age_text}Не забудь поздравить! 🎂🎁"
+                            else:
+                                message = f"🎉 СЕГОДНЯ день рождения у {name_with_username}!\nНе забудь поздравить! 🎂🎁"
+                        elif days_until == 1:
+                            age_will_be = f" (исполнится {current_age + 1} лет)" if current_age > 0 else ""
+                            message = f"🎂 Не забудь поздравить {name_with_username} завтра ({formatted_date}){age_will_be}!"
+                        elif days_until == 3:
+                            age_will_be = f" (исполнится {current_age + 1} лет)" if current_age > 0 else ""
+                            message = f"🎂 Не забудь поздравить {name_with_username} через 3 дня ({formatted_date}){age_will_be}!"
+                        else:  # 7 дней
+                            age_will_be = f" (исполнится {current_age + 1} лет)" if current_age > 0 else ""
+                            message = f"🎂 Не забудь поздравить {name_with_username} через 7 дней ({formatted_date}){age_will_be}!"
+                    
+                    elif event_type == 'holiday':
+                        # Для праздников используем название события
+                        holiday_name = event_name if event_name else full_name
+                        if days_until == 0:
+                            message = f"🎊 СЕГОДНЯ {holiday_name}!\nНе забудь поздравить! 🎉"
+                        elif days_until == 1:
+                            message = f"🎊 Завтра {holiday_name} ({formatted_date})!\nНе забудь поздравить!"
+                        elif days_until == 3:
+                            message = f"🎊 Через 3 дня {holiday_name} ({formatted_date})!\nНе забудь поздравить!"
+                        else:  # 7 дней
+                            message = f"🎊 Через 7 дней {holiday_name} ({formatted_date})!"
+                    
+                    else:  # 'other'
+                        # Для других событий
+                        event_title = event_name if event_name else full_name
+                        if days_until == 0:
+                            message = f"📅 СЕГОДНЯ не забудь про {event_title}!"
+                        elif days_until == 1:
+                            message = f"📅 Завтра не забудь про {event_title} ({formatted_date})!"
+                        elif days_until == 3:
+                            message = f"📅 Через 3 дня не забудь про {event_title} ({formatted_date})!"
+                        else:  # 7 дней
+                            message = f"📅 Через 7 дней: {event_title} ({formatted_date})"
                     
                     # Отправляем уведомление
                     bot.send_message(chat_id=user_id, text=message)
                     notifications_sent += 1
-                    logger.info(f"Отправлено уведомление пользователю {user_id}: {full_name} через {days_until} дней")
+                    logger.info(f"Отправлено уведомление пользователю {user_id}: {full_name} [{event_type}] через {days_until} дней")
                     
                 except Exception as e:
                     logger.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
