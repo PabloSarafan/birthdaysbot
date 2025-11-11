@@ -1,14 +1,17 @@
 import os
 import logging
 from datetime import datetime, date
-from telegram import Update, BotCommand
+from uuid import uuid4
+from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import (
     Updater, 
     CommandHandler, 
     MessageHandler, 
     Filters, 
     CallbackContext,
-    ConversationHandler
+    ConversationHandler,
+    InlineQueryHandler
 )
 from dotenv import load_dotenv
 import database
@@ -195,12 +198,19 @@ def add_date(update: Update, context: CallbackContext) -> int:
         
         # Для дня рождения спрашиваем username, для остальных - сохраняем сразу
         if event_type == 'birthday':
+            # Создаем кнопку для пропуска
+            keyboard = [
+                [KeyboardButton("⏭ Пропустить")]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            
             update.message.reply_text(
                 f"✅ Дата: {date_str}\n\n"
-                "Теперь введите Telegram username этого человека (например: @ivan или ivan)\n\n"
-                "Это поможет быстро найти контакт в уведомлениях.\n"
-                "Если username нет, напишите: нет\n\n"
-                "Отменить: /cancel"
+                "Добавьте Telegram контакт:\n\n"
+                "📱 Нажмите 📎 (скрепка внизу) → Контакт → Выберите человека\n\n"
+                "⏭ Или нажмите 'Пропустить'\n\n"
+                "Отменить: /cancel",
+                reply_markup=reply_markup
             )
             return WAITING_USERNAME
         else:
@@ -244,30 +254,49 @@ def add_date(update: Update, context: CallbackContext) -> int:
 
 def add_username(update: Update, context: CallbackContext) -> int:
     """Получение username и сохранение в базу данных (только для дней рождения)."""
-    username_input = update.message.text.strip()
     full_name = context.user_data.get('full_name')
     birth_date = context.user_data.get('birth_date')
     formatted_date = context.user_data.get('formatted_date')
     event_type = context.user_data.get('event_type', 'birthday')
     event_name = context.user_data.get('event_name')
     user_id = update.effective_user.id
+    bot = context.bot
     
-    # Обработка username
     telegram_username = None
-    if username_input.lower() not in ['нет', 'no', 'skip', '-']:
-        # Убираем @ если есть
-        username_clean = username_input.lstrip('@')
+    
+    # Обработка контакта (когда пользователь выбрал контакт из телефона)
+    if update.message.contact:
+        contact = update.message.contact
+        logger.info(f"Получен контакт: {contact.first_name} {contact.last_name}, user_id: {contact.user_id}")
         
-        # Валидация username (только буквы, цифры и подчеркивание)
-        if username_clean and username_clean.replace('_', '').isalnum():
-            telegram_username = username_clean
-        else:
-            update.message.reply_text(
-                "❌ Неверный формат username.\n"
-                "Username может содержать только буквы, цифры и подчеркивание.\n"
-                "Попробуйте еще раз или напишите 'нет':"
-            )
-            return WAITING_USERNAME
+        # Пытаемся получить username через user_id
+        if contact.user_id:
+            try:
+                chat = bot.get_chat(contact.user_id)
+                telegram_username = chat.username
+                logger.info(f"Username получен из контакта: @{telegram_username}")
+            except Exception as e:
+                logger.warning(f"Не удалось получить username из контакта: {e}")
+                telegram_username = None
+    
+    # Обработка кнопки "Пропустить"
+    elif update.message.text and update.message.text.strip() == "⏭ Пропустить":
+        telegram_username = None
+    
+    # Если пришло что-то другое (не контакт и не кнопка) - объясняем что делать
+    else:
+        keyboard = [
+            [KeyboardButton("⏭ Пропустить")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        
+        update.message.reply_text(
+            "❌ Пожалуйста, отправьте контакт или нажмите 'Пропустить'\n\n"
+            "Чтобы отправить контакт:\n"
+            "Нажмите 📎 → Контакт → Выберите человека",
+            reply_markup=reply_markup
+        )
+        return WAITING_USERNAME
     
     # Сохраняем в базу данных
     if database.add_birthday(user_id, full_name, birth_date, telegram_username, event_type, event_name):
@@ -276,11 +305,15 @@ def add_username(update: Update, context: CallbackContext) -> int:
             f"✅ Успешно сохранено!\n\n"
             f"👤 {full_name}{username_text}\n"
             f"🎂 {formatted_date}\n\n"
-            f"Я буду напоминать вам за 7, 3 и 1 день до дня рождения."
+            f"Я буду напоминать вам за 7, 3 и 1 день до дня рождения.",
+            reply_markup=ReplyKeyboardRemove()  # Убираем клавиатуру
         )
         logger.info(f"Пользователь {user_id} добавил: {full_name}{username_text} - {formatted_date}")
     else:
-        update.message.reply_text("❌ Ошибка при сохранении. Попробуйте позже.")
+        update.message.reply_text(
+            "❌ Ошибка при сохранении. Попробуйте позже.",
+            reply_markup=ReplyKeyboardRemove()
+        )
     
     # Очищаем данные
     context.user_data.clear()
@@ -589,12 +622,21 @@ def edit_date(update: Update, context: CallbackContext) -> int:
             old_username = context.user_data.get('old_username')
             username_info = f" (@{old_username})" if old_username else " (нет)"
             
+            # Создаем кнопку для пропуска
+            keyboard = [
+                [KeyboardButton("⏭ Пропустить")]
+            ]
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            
             update.message.reply_text(
                 f"✅ Дата: {date_str}\n\n"
                 f"Текущий username:{username_info}\n\n"
-                f"Введите новый Telegram username (например: @ivan или ivan)\n"
-                f"Если username нет или хотите оставить текущий, напишите: нет\n\n"
-                f"Отменить: /cancel"
+                f"Обновите контакт:\n\n"
+                f"📱 Отправить контакт:\n"
+                f"   Нажмите 📎 → Контакт → Выберите человека из списка\n\n"
+                f"⏭ Или нажмите 'Пропустить' (оставить текущий)\n\n"
+                f"Отменить: /cancel",
+                reply_markup=reply_markup
             )
             return WAITING_EDIT_USERNAME
         else:
@@ -635,7 +677,6 @@ def edit_date(update: Update, context: CallbackContext) -> int:
 
 def edit_username(update: Update, context: CallbackContext) -> int:
     """Получение username и обновление записи (только для дней рождения)."""
-    username_input = update.message.text.strip()
     birthday_id = context.user_data.get('edit_id')
     new_name = context.user_data.get('new_name')
     new_date = context.user_data.get('new_date')
@@ -644,23 +685,43 @@ def edit_username(update: Update, context: CallbackContext) -> int:
     event_type = context.user_data.get('old_event_type', 'birthday')
     new_event_name = context.user_data.get('new_event_name')
     user_id = update.effective_user.id
+    bot = context.bot
     
-    # Обработка username
     telegram_username = old_username  # По умолчанию оставляем старый
-    if username_input.lower() not in ['нет', 'no', 'skip', '-']:
-        # Убираем @ если есть
-        username_clean = username_input.lstrip('@')
+    
+    # Обработка контакта (когда пользователь выбрал контакт из телефона)
+    if update.message.contact:
+        contact = update.message.contact
+        logger.info(f"Получен контакт при редактировании: {contact.first_name} {contact.last_name}, user_id: {contact.user_id}")
         
-        # Валидация username
-        if username_clean and username_clean.replace('_', '').isalnum():
-            telegram_username = username_clean
-        else:
-            update.message.reply_text(
-                "❌ Неверный формат username.\n"
-                "Username может содержать только буквы, цифры и подчеркивание.\n"
-                "Попробуйте еще раз или напишите 'нет':"
-            )
-            return WAITING_EDIT_USERNAME
+        # Пытаемся получить username через user_id
+        if contact.user_id:
+            try:
+                chat = bot.get_chat(contact.user_id)
+                telegram_username = chat.username
+                logger.info(f"Username получен из контакта: @{telegram_username}")
+            except Exception as e:
+                logger.warning(f"Не удалось получить username из контакта: {e}")
+                telegram_username = None
+    
+    # Обработка кнопки "Пропустить" (оставляет старый username)
+    elif update.message.text and update.message.text.strip() == "⏭ Пропустить":
+        pass  # telegram_username уже установлен = old_username
+    
+    # Если пришло что-то другое (не контакт и не кнопка) - объясняем что делать
+    else:
+        keyboard = [
+            [KeyboardButton("⏭ Пропустить")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        
+        update.message.reply_text(
+            "❌ Пожалуйста, отправьте контакт или нажмите 'Пропустить'\n\n"
+            "Чтобы отправить контакт:\n"
+            "Нажмите 📎 → Контакт → Выберите человека",
+            reply_markup=reply_markup
+        )
+        return WAITING_EDIT_USERNAME
     
     # Обновляем запись
     if database.update_birthday(birthday_id, user_id, new_name, new_date, telegram_username, event_type, new_event_name):
@@ -668,11 +729,15 @@ def edit_username(update: Update, context: CallbackContext) -> int:
         update.message.reply_text(
             f"✅ Запись обновлена!\n\n"
             f"👤 {new_name}{username_text}\n"
-            f"🎂 {formatted_date}"
+            f"🎂 {formatted_date}",
+            reply_markup=ReplyKeyboardRemove()  # Убираем клавиатуру
         )
         logger.info(f"Пользователь {user_id} обновил запись {birthday_id}")
     else:
-        update.message.reply_text("❌ Ошибка при обновлении.")
+        update.message.reply_text(
+            "❌ Ошибка при обновлении.",
+            reply_markup=ReplyKeyboardRemove()
+        )
     
     context.user_data.clear()
     return ConversationHandler.END
@@ -699,6 +764,113 @@ def check_notifications(update: Update, context: CallbackContext) -> None:
     scheduler.check_and_send_notifications(bot)
     
     update.message.reply_text("✅ Проверка завершена! Уведомления отправлены если есть подходящие даты.")
+
+
+def inline_query(update: Update, context: CallbackContext) -> None:
+    """
+    Обработка inline запросов для поиска username из уже добавленных контактов.
+    Пользователь вводит: @botname имя
+    Бот показывает список контактов с username.
+    """
+    query = update.inline_query.query.strip().lower()
+    user_id = update.inline_query.from_user.id
+    
+    logger.info(f"Inline запрос от пользователя {user_id}: '{query}'")
+    
+    # Получаем все записи пользователя
+    birthdays = database.get_all_birthdays(user_id)
+    
+    if not birthdays:
+        # Если нет записей, показываем подсказку
+        results = [
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title="У вас нет добавленных событий",
+                description="Используйте /add чтобы добавить первое событие",
+                input_message_content=InputTextMessageContent(
+                    "Используйте /add чтобы добавить событие"
+                )
+            )
+        ]
+        update.inline_query.answer(results, cache_time=1)
+        return
+    
+    # Фильтруем и ищем контакты с username
+    results = []
+    
+    for birthday_id, full_name, birth_date, telegram_username, event_type, event_name in birthdays:
+        # Пропускаем записи без username
+        if not telegram_username:
+            continue
+        
+        # Определяем имя для отображения
+        if event_type == 'birthday':
+            display_name = full_name
+        else:
+            display_name = event_name if event_name else full_name
+        
+        # Поиск (если query пустой, показываем все)
+        if query and query not in display_name.lower() and query not in telegram_username.lower():
+            continue
+        
+        # Форматируем дату
+        birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
+        if event_type == 'birthday':
+            formatted_date = birth_date_obj.strftime('%d.%m.%Y')
+        else:
+            formatted_date = birth_date_obj.strftime('%d.%m')
+        
+        # Определяем эмодзи
+        if event_type == 'holiday':
+            emoji = "🎊"
+        elif event_type == 'other':
+            emoji = "📅"
+        else:
+            emoji = "🎂"
+        
+        # Создаем результат
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid4()),
+                title=f"{emoji} {display_name}",
+                description=f"@{telegram_username} • {formatted_date}",
+                input_message_content=InputTextMessageContent(
+                    f"@{telegram_username}"
+                )
+            )
+        )
+    
+    # Если ничего не найдено
+    if not results:
+        if query:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title=f"Не найдено контактов по запросу '{query}'",
+                    description="Попробуйте другой запрос",
+                    input_message_content=InputTextMessageContent(
+                        f"Не найдено контактов по запросу '{query}'"
+                    )
+                )
+            ]
+        else:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="У вас нет контактов с username",
+                    description="Добавьте username при создании события",
+                    input_message_content=InputTextMessageContent(
+                        "У вас нет контактов с username"
+                    )
+                )
+            ]
+    
+    # Ограничиваем результаты (Telegram позволяет максимум 50)
+    results = results[:50]
+    
+    # Отправляем результаты
+    update.inline_query.answer(results, cache_time=10)
+    logger.info(f"Отправлено {len(results)} результатов inline запроса")
 
 
 def setup_commands(bot):
@@ -759,7 +931,7 @@ def main() -> None:
             WAITING_EVENT_NAME: [MessageHandler(Filters.text & ~Filters.command, add_event_name)],
             WAITING_NAME: [MessageHandler(Filters.text & ~Filters.command, add_name)],
             WAITING_DATE: [MessageHandler(Filters.text & ~Filters.command, add_date)],
-            WAITING_USERNAME: [MessageHandler(Filters.text & ~Filters.command, add_username)],
+            WAITING_USERNAME: [MessageHandler((Filters.text | Filters.contact) & ~Filters.command, add_username)],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
@@ -782,11 +954,15 @@ def main() -> None:
             WAITING_EDIT_ID: [MessageHandler(Filters.text & ~Filters.command, edit_id)],
             WAITING_EDIT_NAME: [MessageHandler(Filters.text & ~Filters.command, edit_name)],
             WAITING_EDIT_DATE: [MessageHandler(Filters.text & ~Filters.command, edit_date)],
-            WAITING_EDIT_USERNAME: [MessageHandler(Filters.text & ~Filters.command, edit_username)],
+            WAITING_EDIT_USERNAME: [MessageHandler((Filters.text | Filters.contact) & ~Filters.command, edit_username)],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     dispatcher.add_handler(edit_handler)
+    
+    # Обработчик inline запросов
+    dispatcher.add_handler(InlineQueryHandler(inline_query))
+    logger.info("Inline режим активирован")
     
     # Запускаем бота
     logger.info("Бот запущен и готов к работе")
