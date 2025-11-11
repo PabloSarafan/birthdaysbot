@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from datetime import datetime, date
 from uuid import uuid4
 from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 WAITING_NAME, WAITING_EVENT_TYPE, WAITING_EVENT_NAME, WAITING_DATE, WAITING_USERNAME = range(5)
 WAITING_DELETE_ID, WAITING_EDIT_ID, WAITING_EDIT_NAME, WAITING_EDIT_DATE, WAITING_EDIT_USERNAME = range(5, 10)
 WAITING_EDIT_EVENT_TYPE, WAITING_EDIT_EVENT_NAME = range(10, 12)
+WAITING_IMPORT_TEXT, WAITING_IMPORT_CONFIRMATION = range(100, 102)
 
 
 def start(update: Update, context: CallbackContext) -> None:
@@ -65,6 +67,103 @@ def start(update: Update, context: CallbackContext) -> None:
 """
     update.message.reply_text(welcome_message)
     logger.info(f"Пользователь {user.id} ({user.username}) запустил бота")
+
+
+def parse_bulk_import(text: str):
+    """
+    Парсинг текста для массового импорта событий.
+    
+    Формат ожидаемого текста:
+    1. 🎂 Имя (@username)
+       📅 ДД.ММ.ГГГГ (дополнительный текст)
+    
+    Returns:
+        tuple: (parsed_events, errors)
+            - parsed_events: список кортежей (full_name, date_str, username, event_type, event_name)
+            - errors: список строк с ошибками парсинга
+    """
+    parsed_events = []
+    errors = []
+    
+    # Разбиваем текст на блоки по записям (по номерам)
+    # Паттерн: номер с точкой, эмодзи, имя, опционально username, перевод строки, дата
+    pattern = r'^\s*\d+\.\s*(🎂|🎊|📅)\s*(.+?)(?:\s*\((@[^)]+)\))?\s*\n\s*📅\s*(\d{2}\.\d{2}(?:\.\d{4})?)'
+    
+    lines = text.split('\n')
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # Ищем начало записи (номер с точкой и эмодзи)
+        if re.match(r'^\d+\.\s*[🎂🎊📅]', line):
+            # Собираем текущую запись и следующую строку (с датой)
+            current_block = line
+            if i + 1 < len(lines):
+                current_block += '\n' + lines[i + 1]
+                i += 1  # Пропускаем следующую строку, т.к. уже обработали
+            
+            # Пытаемся распарсить блок
+            match = re.search(pattern, current_block, re.MULTILINE)
+            
+            if match:
+                emoji = match.group(1)
+                name_part = match.group(2).strip()
+                username = match.group(3).strip() if match.group(3) else None
+                date_str = match.group(4).strip()
+                
+                # Убираем @ из username если есть
+                if username and username.startswith('@'):
+                    username = username[1:]
+                
+                # Определяем тип события по эмодзи
+                if emoji == '🎂':
+                    event_type = 'birthday'
+                    event_name = None
+                    full_name = name_part
+                elif emoji == '🎊':
+                    event_type = 'holiday'
+                    event_name = name_part
+                    full_name = name_part
+                elif emoji == '📅':
+                    event_type = 'other'
+                    event_name = name_part
+                    full_name = name_part
+                else:
+                    event_type = 'birthday'
+                    event_name = None
+                    full_name = name_part
+                
+                # Проверяем и нормализуем дату
+                try:
+                    if len(date_str.split('.')) == 3:
+                        # Формат ДД.ММ.ГГГГ
+                        day, month, year = date_str.split('.')
+                        parsed_date = datetime.strptime(date_str, '%d.%m.%Y').date()
+                        normalized_date = parsed_date.strftime('%Y-%m-%d')
+                    else:
+                        # Формат ДД.ММ (для праздников/других событий)
+                        day, month = date_str.split('.')
+                        # Используем год 1900 для обозначения что год не указан
+                        normalized_date = f"1900-{month.zfill(2)}-{day.zfill(2)}"
+                        # Проверяем валидность даты
+                        datetime.strptime(normalized_date, '%Y-%m-%d')
+                    
+                    parsed_events.append((full_name, normalized_date, username, event_type, event_name))
+                    logger.info(f"Распарсено: {full_name}, {normalized_date}, @{username}, {event_type}")
+                    
+                except ValueError as e:
+                    error_msg = f"Неверный формат даты '{date_str}' для записи: {name_part}"
+                    errors.append(error_msg)
+                    logger.warning(error_msg)
+            else:
+                error_msg = f"Не удалось распарсить запись: {current_block[:50]}..."
+                errors.append(error_msg)
+                logger.warning(error_msg)
+        
+        i += 1
+    
+    return parsed_events, errors
 
 
 def add_start(update: Update, context: CallbackContext) -> int:
@@ -745,9 +844,249 @@ def edit_username(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
+def parse_bulk_import(text: str):
+    """
+    Парсинг списка событий из форматированного текста.
+    
+    Формат:
+    1. 🎂 Имя (@username)
+       📅 ДД.ММ.ГГГГ (описание...)
+    
+    Returns:
+        Tuple[List, List]: (успешно распарсенные записи, ошибки)
+        Запись: (full_name, date_str, username, event_type, event_name)
+    """
+    records = []
+    errors = []
+    
+    # Паттерн для парсинга каждой записи
+    # Ищем строки вида: "N. 🎂 Имя (@username)" и следующую строку "📅 дата"
+    pattern = r'^\d+\.\s*(🎂|🎊|📅)\s*(.+?)(?:\s*\(@([^)]+)\))?\s*$\s*^\s*📅\s*(\d{2}\.\d{2}(?:\.\d{4})?)'
+    
+    # Разбиваем текст на строки для обработки
+    lines = text.split('\n')
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # Проверяем, начинается ли строка с номера и эмодзи
+        if re.match(r'^\d+\.\s*(🎂|🎊|📅)', line):
+            # Извлекаем эмодзи
+            emoji_match = re.search(r'(🎂|🎊|📅)', line)
+            if not emoji_match:
+                i += 1
+                continue
+            
+            emoji = emoji_match.group(1)
+            
+            # Определяем тип события
+            if emoji == '🎂':
+                event_type = 'birthday'
+            elif emoji == '🎊':
+                event_type = 'holiday'
+            else:  # 📅
+                event_type = 'other'
+            
+            # Извлекаем имя и username
+            name_part = re.sub(r'^\d+\.\s*(🎂|🎊|📅)\s*', '', line)
+            
+            # Проверяем наличие @username
+            username_match = re.search(r'\(@([^)]+)\)', name_part)
+            username = username_match.group(1) if username_match else None
+            
+            # Удаляем @username из имени
+            full_name = re.sub(r'\s*\(@[^)]+\)', '', name_part).strip()
+            
+            # Следующая строка должна содержать дату
+            if i + 1 < len(lines):
+                date_line = lines[i + 1].strip()
+                date_match = re.search(r'📅\s*(\d{2}\.\d{2}(?:\.\d{4})?)', date_line)
+                
+                if date_match:
+                    date_str = date_match.group(1)
+                    
+                    # Конвертируем дату в формат YYYY-MM-DD
+                    try:
+                        if len(date_str) == 10:  # ДД.ММ.ГГГГ
+                            date_obj = datetime.strptime(date_str, '%d.%m.%Y')
+                        else:  # ДД.ММ
+                            # Для праздников и других событий используем год 1900
+                            date_obj = datetime.strptime(date_str + '.1900', '%d.%m.%Y')
+                        
+                        db_date = date_obj.strftime('%Y-%m-%d')
+                        
+                        # Для праздников и других событий event_name = full_name
+                        event_name = full_name if event_type in ['holiday', 'other'] else None
+                        
+                        records.append((full_name, db_date, username, event_type, event_name))
+                        logger.info(f"Распарсена запись: {full_name} - {db_date} [{event_type}]")
+                    except Exception as e:
+                        errors.append(f"Ошибка парсинга даты для '{full_name}': {e}")
+                        logger.warning(f"Ошибка парсинга даты: {date_str} - {e}")
+                else:
+                    errors.append(f"Не найдена дата для '{full_name}'")
+                
+                i += 2  # Пропускаем обе строки (имя и дата)
+            else:
+                errors.append(f"Не найдена строка с датой для '{full_name}'")
+                i += 1
+        else:
+            i += 1
+    
+    return records, errors
+
+
 def cancel(update: Update, context: CallbackContext) -> int:
     """Отмена текущей операции."""
-    update.message.reply_text("❌ Операция отменена.")
+    update.message.reply_text("❌ Операция отменена.", reply_markup=ReplyKeyboardRemove())
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+def import_start(update: Update, context: CallbackContext) -> int:
+    """Начало диалога массового импорта событий."""
+    update.message.reply_text(
+        "📥 Массовый импорт событий\n\n"
+        "Отправьте список событий в следующем формате:\n\n"
+        "1. 🎂 Имя Фамилия (@username)\n"
+        "   📅 ДД.ММ.ГГГГ (дополнительная информация)\n\n"
+        "2. 🎊 Название праздника\n"
+        "   📅 ДД.ММ\n\n"
+        "3. 📅 Другое событие\n"
+        "   📅 ДД.ММ\n\n"
+        "💡 Примеры:\n\n"
+        "1. 🎂 Иван Петров (@ivan_petrov)\n"
+        "   📅 15.03.1990 (через 125 дн., исполнится 35 лет)\n\n"
+        "2. 🎊 Новый Год\n"
+        "   📅 01.01\n\n"
+        "Просто скопируйте и отправьте весь список одним сообщением.\n\n"
+        "Отменить: /cancel"
+    )
+    return WAITING_IMPORT_TEXT
+
+
+def import_receive_text(update: Update, context: CallbackContext) -> int:
+    """Получение текста для импорта и показ превью."""
+    text = update.message.text
+    user_id = update.effective_user.id
+    
+    logger.info(f"Пользователь {user_id} отправил текст для импорта, длина: {len(text)}")
+    
+    # Парсим текст
+    parsed_events, errors = parse_bulk_import(text)
+    
+    if not parsed_events and not errors:
+        update.message.reply_text(
+            "❌ Не удалось найти ни одной записи в нужном формате.\n\n"
+            "Проверьте формат и попробуйте снова, или используйте /cancel для отмены."
+        )
+        return WAITING_IMPORT_TEXT
+    
+    # Сохраняем в context для следующего шага
+    context.user_data['import_candidates'] = parsed_events
+    context.user_data['import_errors'] = errors
+    
+    # Формируем превью
+    message = f"📋 Найдено записей: {len(parsed_events)}\n\n"
+    
+    for idx, (full_name, date_str, username, event_type, event_name) in enumerate(parsed_events, 1):
+        # Форматируем дату для отображения
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+        if date_obj.year == 1900:
+            formatted_date = date_obj.strftime('%d.%m')
+        else:
+            formatted_date = date_obj.strftime('%d.%m.%Y')
+        
+        # Выбираем эмодзи
+        if event_type == 'birthday':
+            emoji = '🎂'
+            display_name = full_name
+        elif event_type == 'holiday':
+            emoji = '🎊'
+            display_name = event_name if event_name else full_name
+        else:
+            emoji = '📅'
+            display_name = event_name if event_name else full_name
+        
+        username_text = f" (@{username})" if username else ""
+        message += f"{idx}. {emoji} {display_name}{username_text} - {formatted_date}\n"
+    
+    if errors:
+        message += f"\n⚠️ Не удалось распарсить: {len(errors)} записей\n"
+        if len(errors) <= 3:
+            for error in errors:
+                message += f"  • {error}\n"
+    
+    message += "\n❓ Подтвердить импорт этих записей?"
+    
+    # Создаем кнопки подтверждения
+    keyboard = [
+        [KeyboardButton("✅ Подтвердить"), KeyboardButton("❌ Отменить")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    
+    update.message.reply_text(message, reply_markup=reply_markup)
+    
+    return WAITING_IMPORT_CONFIRMATION
+
+
+def import_confirm(update: Update, context: CallbackContext) -> int:
+    """Подтверждение и сохранение импортированных записей."""
+    user_id = update.effective_user.id
+    choice = update.message.text.strip()
+    
+    if choice == "❌ Отменить":
+        update.message.reply_text(
+            "❌ Импорт отменен.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+    
+    if choice != "✅ Подтвердить":
+        update.message.reply_text(
+            "Пожалуйста, нажмите одну из кнопок: '✅ Подтвердить' или '❌ Отменить'"
+        )
+        return WAITING_IMPORT_CONFIRMATION
+    
+    # Получаем данные из context
+    import_candidates = context.user_data.get('import_candidates', [])
+    
+    if not import_candidates:
+        update.message.reply_text(
+            "❌ Нет данных для импорта.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+    
+    # Импортируем записи
+    success_count = 0
+    failed_count = 0
+    
+    for full_name, date_str, username, event_type, event_name in import_candidates:
+        try:
+            if database.add_birthday(user_id, full_name, date_str, username, event_type, event_name):
+                success_count += 1
+            else:
+                failed_count += 1
+        except Exception as e:
+            logger.error(f"Ошибка при импорте записи {full_name}: {e}")
+            failed_count += 1
+    
+    # Показываем результат
+    result_message = f"✅ Импорт завершен!\n\n"
+    result_message += f"📊 Успешно добавлено: {success_count}\n"
+    if failed_count > 0:
+        result_message += f"❌ Ошибок: {failed_count}\n"
+    result_message += f"\nИспользуйте /list чтобы посмотреть все события."
+    
+    update.message.reply_text(result_message, reply_markup=ReplyKeyboardRemove())
+    
+    logger.info(f"Пользователь {user_id} импортировал {success_count} записей")
+    
+    # Очищаем данные
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -883,6 +1222,7 @@ def setup_commands(bot):
         BotCommand("list", "Показать все события"),
         BotCommand("delete", "Удалить событие"),
         BotCommand("edit", "Редактировать событие"),
+        BotCommand("import", "Массовый импорт событий из списка"),
         BotCommand("check", "Проверить уведомления вручную"),
         BotCommand("cancel", "Отменить текущую операцию"),
     ]
@@ -961,6 +1301,17 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     dispatcher.add_handler(edit_handler)
+    
+    # ConversationHandler для /import
+    import_handler = ConversationHandler(
+        entry_points=[CommandHandler('import', import_start)],
+        states={
+            WAITING_IMPORT_TEXT: [MessageHandler(Filters.text & ~Filters.command, import_receive_text)],
+            WAITING_IMPORT_CONFIRMATION: [MessageHandler(Filters.regex('^(✅ Подтвердить|❌ Отменить)$'), import_confirm)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    dispatcher.add_handler(import_handler)
     
     # Обработчик inline запросов
     dispatcher.add_handler(InlineQueryHandler(inline_query))
