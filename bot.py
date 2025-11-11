@@ -323,7 +323,9 @@ def add_username(update: Update, context: CallbackContext) -> int:
 def list_birthdays(update: Update, context: CallbackContext) -> None:
     """Показать все события, отсортированные по дням до наступления."""
     user_id = update.effective_user.id
+    logger.info(f"Команда /list от пользователя {user_id}")
     birthdays = database.get_all_birthdays(user_id)
+    logger.info(f"Получено записей из БД: {len(birthdays)}")
     
     if not birthdays:
         update.message.reply_text(

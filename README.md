@@ -133,10 +133,25 @@ caprover login
 2. Перейдите в `Apps` → ваше приложение
 3. Вкладка `App Configs`
 4. Раздел `Environmental Variables`
-5. Добавьте переменную:
-   - **Key**: `BOT_TOKEN`
-   - **Value**: ваш токен от BotFather
+5. Добавьте переменные:
+   - **Key**: `BOT_TOKEN`, **Value**: ваш токен от BotFather
+   - **Key**: `DB_DIR`, **Value**: `/app/data`
 6. Нажмите `Add` и `Save & Update`
+
+### ⚠️ ВАЖНО: Настройка Persistent Storage для сохранения базы данных
+
+**Без этой настройки все данные будут теряться при каждом деплое!**
+
+1. В Caprover Dashboard → ваше приложение
+2. Вкладка `App Configs`
+3. Раздел `Persistent Directories`
+4. Добавьте:
+   - **Path in App**: `/app/data`
+   - **Label** (опционально): `database`
+5. Нажмите `Add Persistent Directory`
+6. Нажмите `Save & Update`
+
+Теперь все данные в папке `/app/data` (включая `birthdays.db`) будут сохраняться между деплоями!
 
 ### Деплой:
 

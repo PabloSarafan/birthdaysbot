@@ -16,6 +16,12 @@ COPY database.py .
 COPY scheduler.py .
 COPY imghdr.py /usr/local/lib/python3.12/
 
+# Создаем директорию для базы данных
+RUN mkdir -p /app/data
+
+# Устанавливаем переменную окружения для пути к БД
+ENV DB_DIR=/app/data
+
 # Запускаем бота
 CMD ["python", "bot.py"]
 

@@ -1,11 +1,14 @@
 import sqlite3
 import logging
+import os
 from datetime import datetime
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DB_NAME = 'birthdays.db'
+# Используем переменную окружения для пути к БД или дефолтное значение
+DB_DIR = os.getenv('DB_DIR', '.')
+DB_NAME = os.path.join(DB_DIR, 'birthdays.db')
 
 
 def init_db():
