@@ -2,6 +2,7 @@ import os
 import logging
 import re
 from datetime import datetime, date
+from typing import Optional
 from uuid import uuid4
 from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram import InlineQueryResultArticle, InputTextMessageContent
@@ -13,15 +14,27 @@ from telegram.ext import (
     Filters, 
     CallbackContext,
     ConversationHandler,
-    InlineQueryHandler
+    InlineQueryHandler,
+    CallbackQueryHandler
 )
 from dotenv import load_dotenv
 import database
 import scheduler
 from scheduler import years_word
 
-# Загружаем переменные окружения из .env файла (для локальной разработки)
+# OpenAI для генерации поздравлений (опционально)
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
+# Загружаем переменные окружения: общий .env и отдельные файлы для секретов
+# Путь к папке с ботом — чтобы openai.env находился при любом текущем каталоге
+_BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv()
+load_dotenv(os.path.join(_BOT_DIR, 'apibot.env'), override=True)
+load_dotenv(os.path.join(_BOT_DIR, 'openai.env'), override=True)
 
 # Настройка логирования
 logging.basicConfig(
@@ -1109,6 +1122,182 @@ def check_notifications(update: Update, context: CallbackContext) -> None:
     update.message.reply_text("✅ Проверка завершена! Уведомления отправлены если есть подходящие даты.")
 
 
+# --- Генерация поздравлений через OpenAI ---
+
+def _openai_client():
+    """Создать клиент OpenAI если есть ключ."""
+    if not OPENAI_AVAILABLE:
+        return None
+    key = (os.getenv('OPENAI_API_KEY') or '').strip()
+    if not key:
+        return None
+    # Плейсхолдер из примера или слишком короткий ключ
+    if key.startswith('sk-your-') or len(key) < 40:
+        logger.warning("OpenAI: ключ похож на плейсхолдер или слишком короткий (длина %s)", len(key))
+        return None
+    logger.info("OpenAI: ключ загружен, длина %s символов", len(key))
+    return openai.OpenAI(api_key=key)
+
+
+def generate_congratulation(full_name: str, custom_prompt: Optional[str] = None) -> str:
+    """
+    Сгенерировать текст поздравления с днём рождения через OpenAI.
+    
+    Args:
+        full_name: Имя именинника
+        custom_prompt: Дополнительные пожелания (стиль, тон и т.д.), опционально
+    
+    Returns:
+        Текст поздравления или сообщение об ошибке
+    """
+    client = _openai_client()
+    if not client:
+        return "Сервис генерации недоступен. Добавьте OPENAI_API_KEY в настройки бота."
+    
+    system = (
+        "Ты помогаешь писать короткие тёплые поздравления с днём рождения. "
+        "Пиши от первого лица, как будто пользователь сам поздравляет. "
+        "Без обрамления в кавычки и без подписи в конце. Один короткий абзац."
+    )
+    user_msg = f"Напиши поздравление с днём рождения для {full_name}."
+    if custom_prompt and custom_prompt.strip():
+        user_msg += f" Дополнительные пожелания: {custom_prompt.strip()}"
+    
+    model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=300,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        return text if text else "Не удалось сгенерировать поздравление."
+    except Exception as e:
+        logger.exception("Ошибка OpenAI при генерации поздравления")
+        err_str = str(e).lower()
+        if "401" in err_str or "invalid_api_key" in err_str or "incorrect api key" in err_str:
+            return "Проверьте OPENAI_API_KEY в файле openai.env — ключ неверный или не задан."
+        return "Ошибка при генерации. Попробуйте позже или проверьте openai.env."
+
+
+def congratulate_callback(update: Update, context: CallbackContext) -> None:
+    """Обработка нажатия кнопок «Сгенерировать поздравление» и «Свой промпт»."""
+    query = update.callback_query
+    query.answer()
+    
+    data = (query.data or "").strip()
+    user_id = update.effective_user.id
+    
+    if data.startswith("congratulate_prompt:"):
+        birthday_id_str = data.split(":", 1)[1]
+        try:
+            birthday_id = int(birthday_id_str)
+        except ValueError:
+            query.message.reply_text("Ошибка: неверные данные.")
+            return
+        record = database.get_birthday_by_id(birthday_id, user_id)
+        if not record:
+            query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
+            return
+        full_name = record[1]
+        sent = query.message.reply_text(
+            f"✏️ Чтобы сгенерировать поздравление для {full_name} с своим текстом, "
+            "ответьте на это сообщение текстом вашего промпта.\n\n"
+            "Например: это моя мама, хочу красивое поздравление с юбилеем"
+        )
+        # Сохраняем привязку «сообщение → запись», чтобы по ответу не показывать id
+        key = (sent.chat_id, sent.message_id)
+        context.bot_data.setdefault("prompt_wait", {})[key] = (birthday_id, user_id)
+        return
+    
+    if not data.startswith("congratulate:"):
+        return
+    
+    birthday_id_str = data.split(":", 1)[1]
+    try:
+        birthday_id = int(birthday_id_str)
+    except ValueError:
+        query.message.reply_text("Ошибка: неверные данные.")
+        return
+    
+    record = database.get_birthday_by_id(birthday_id, user_id)
+    if not record:
+        query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
+        return
+    
+    full_name = record[1]
+    query.message.reply_text("⏳ Генерирую поздравление...")
+    
+    text = generate_congratulation(full_name, custom_prompt=None)
+    query.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
+
+
+def prompt_reply_handler(update: Update, context: CallbackContext) -> None:
+    """Обработка ответа на сообщение «введите промпт» — генерация по своему промпту без показа id."""
+    if not update.message or not update.message.reply_to_message:
+        return
+    reply_to = update.message.reply_to_message
+    if reply_to.from_user.id != context.bot.id:
+        return
+    key = (update.effective_chat.id, reply_to.message_id)
+    prompt_wait = context.bot_data.get("prompt_wait") or {}
+    if key not in prompt_wait:
+        return
+    birthday_id, user_id = prompt_wait.pop(key)
+    if update.effective_user.id != user_id:
+        return
+    prompt_text = (update.message.text or "").strip()
+    if not prompt_text:
+        update.message.reply_text("Напишите текст промпта.")
+        return
+    record = database.get_birthday_by_id(birthday_id, user_id)
+    if not record:
+        update.message.reply_text("Запись не найдена.")
+        return
+    full_name = record[1]
+    update.message.reply_text("⏳ Генерирую поздравление по вашему промпту...")
+    text = generate_congratulation(full_name, custom_prompt=prompt_text)
+    update.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
+
+
+def prompt_command(update: Update, context: CallbackContext) -> None:
+    """
+    Команда /prompt <birthday_id> <произвольный промпт> — генерация поздравления по своему промпту.
+    """
+    user_id = update.effective_user.id
+    if not context.args or len(context.args) < 1:
+        update.message.reply_text(
+            "Использование: /prompt <номер_записи> ваш промпт\n\n"
+            "Номер записи показывается в подсказке после нажатия кнопки «Свой промпт» в уведомлении о дне рождения."
+        )
+        return
+    
+    try:
+        birthday_id = int(context.args[0])
+    except ValueError:
+        update.message.reply_text("Номер записи должен быть числом.")
+        return
+    
+    custom_prompt = " ".join(context.args[1:]).strip() if len(context.args) > 1 else None
+    if not custom_prompt:
+        update.message.reply_text("Напишите промпт после номера записи, например: /prompt 5 короткое и с юмором")
+        return
+    
+    record = database.get_birthday_by_id(birthday_id, user_id)
+    if not record:
+        update.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
+        return
+    
+    full_name = record[1]
+    update.message.reply_text("⏳ Генерирую поздравление по вашему промпту...")
+    
+    text = generate_congratulation(full_name, custom_prompt=custom_prompt)
+    update.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
+
+
 def inline_query(update: Update, context: CallbackContext) -> None:
     """
     Обработка inline запросов для поиска username из уже добавленных контактов.
@@ -1273,6 +1462,11 @@ def main() -> None:
     
     # Обработчик команды /check (ручная проверка уведомлений)
     dispatcher.add_handler(CommandHandler('check', check_notifications))
+    
+    # Генерация поздравлений: кнопки под уведомлением и команда /prompt
+    dispatcher.add_handler(CallbackQueryHandler(congratulate_callback, pattern=r'^congratulate'))
+    dispatcher.add_handler(CommandHandler('prompt', prompt_command))
+    dispatcher.add_handler(MessageHandler(Filters.reply & Filters.text, prompt_reply_handler))
     
     # ConversationHandler для /add
     add_handler = ConversationHandler(

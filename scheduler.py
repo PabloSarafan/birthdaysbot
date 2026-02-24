@@ -3,6 +3,7 @@ from datetime import datetime, date
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import database
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,7 @@ def check_and_send_notifications(bot):
         
         notifications_sent = 0
         
-        for user_id, full_name, birth_date, telegram_username, event_type, event_name in birthdays:
+        for birthday_id, user_id, full_name, birth_date, telegram_username, event_type, event_name in birthdays:
             days_until = calculate_days_until_birthday(birth_date)
             
             # Проверяем нужно ли отправить уведомление
@@ -120,6 +121,7 @@ def check_and_send_notifications(bot):
                     if not event_type:
                         event_type = 'birthday'
                     
+                    reply_markup = None
                     # Формируем текст уведомления в зависимости от типа события и дней до события
                     if event_type == 'birthday':
                         # Вычисляем возраст на сегодня (если указан год)
@@ -138,6 +140,11 @@ def check_and_send_notifications(bot):
                                 message = f"🎉 СЕГОДНЯ день рождения у {name_with_username} ({formatted_date})!{age_text}Не забудь поздравить! 🎂🎁"
                             else:
                                 message = f"🎉 СЕГОДНЯ день рождения у {name_with_username}!\nНе забудь поздравить! 🎂🎁"
+                            # Кнопки генерации поздравления только для типа «день рождения», не для праздников/других
+                            reply_markup = InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🎁 Сгенерировать поздравление", callback_data=f"congratulate:{birthday_id}")],
+                                [InlineKeyboardButton("✏️ Свой промпт", callback_data=f"congratulate_prompt:{birthday_id}")],
+                            ])
                         elif days_until == 1:
                             age_will_be = f" (исполнится {age_turning} {years_word(age_turning)})" if current_age >= 0 else ""
                             message = f"🎂 Не забудь поздравить {name_with_username} завтра ({formatted_date}){age_will_be}!"
@@ -172,8 +179,8 @@ def check_and_send_notifications(bot):
                         else:  # 7 дней
                             message = f"📅 Через 7 дней: {event_title} ({formatted_date})"
                     
-                    # Отправляем уведомление
-                    bot.send_message(chat_id=user_id, text=message)
+                    # Отправляем уведомление (с кнопками для дня рождения сегодня)
+                    bot.send_message(chat_id=user_id, text=message, reply_markup=reply_markup)
                     notifications_sent += 1
                     logger.info(f"Отправлено уведомление пользователю {user_id}: {full_name} [{event_type}] через {days_until} дней")
                     
