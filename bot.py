@@ -5,6 +5,7 @@ from datetime import datetime, date
 from typing import Optional
 from uuid import uuid4
 from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import InlineQueryResultArticle, InputTextMessageContent
 from telegram.error import Conflict
 from telegram.ext import (
@@ -50,6 +51,21 @@ WAITING_EDIT_EVENT_TYPE, WAITING_EDIT_EVENT_NAME = range(10, 12)
 WAITING_IMPORT_TEXT, WAITING_IMPORT_CONFIRMATION = range(100, 102)
 
 
+def _menu_keyboard():
+    """Inline-кнопки для быстрого управления."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("➕ Добавить", callback_data="menu:add"),
+            InlineKeyboardButton("📋 Список", callback_data="menu:list"),
+        ],
+        [
+            InlineKeyboardButton("🗑 Удалить", callback_data="menu:delete"),
+            InlineKeyboardButton("✏️ Редактировать", callback_data="menu:edit"),
+        ],
+        [InlineKeyboardButton("🔔 Проверить уведомления", callback_data="menu:check")],
+    ])
+
+
 def start(update: Update, context: CallbackContext) -> None:
     """Обработчик команды /start."""
     user = update.effective_user
@@ -78,9 +94,9 @@ def start(update: Update, context: CallbackContext) -> None:
 • Напоминания приходят в 09:00 по МСК
 • Используйте /check чтобы проверить уведомления прямо сейчас
 
-Начнем? Используйте /add чтобы добавить первое событие!
+Начнем? Используйте кнопки ниже или команды.
 """
-    update.message.reply_text(welcome_message)
+    update.message.reply_text(welcome_message, reply_markup=_menu_keyboard())
     logger.info(f"Пользователь {user.id} ({user.username}) запустил бота")
 
 
@@ -181,17 +197,26 @@ def parse_bulk_import(text: str):
     return parsed_events, errors
 
 
+ADD_PROMPT_TEXT = (
+    "📝 Добавление нового события.\n\n"
+    "Выберите тип события:\n\n"
+    "1 - День рождения (с указанием имени и даты рождения)\n"
+    "2 - Праздник (например: Новый Год, 8 Марта)\n"
+    "3 - Другое событие (годовщина, важная дата)\n\n"
+    "Введите номер (1, 2 или 3)\n\nОтменить: /cancel"
+)
+
+
 def add_start(update: Update, context: CallbackContext) -> int:
     """Начало диалога добавления события."""
-    update.message.reply_text(
-        "📝 Добавление нового события.\n\n"
-        "Выберите тип события:\n\n"
-        "1 - День рождения (с указанием имени и даты рождения)\n"
-        "2 - Праздник (например: Новый Год, 8 Марта)\n"
-        "3 - Другое событие (годовщина, важная дата)\n\n"
-        "Введите номер (1, 2 или 3)\n\n"
-        "Отменить: /cancel"
-    )
+    update.message.reply_text(ADD_PROMPT_TEXT)
+    return WAITING_EVENT_TYPE
+
+
+def menu_add_entry(update: Update, context: CallbackContext) -> int:
+    """Вход в добавление события по inline-кнопке."""
+    update.callback_query.answer()
+    context.bot.send_message(chat_id=update.effective_chat.id, text=ADD_PROMPT_TEXT)
     return WAITING_EVENT_TYPE
 
 
@@ -434,17 +459,27 @@ def add_username(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
+def _send_to_chat(update: Update, context: CallbackContext, text: str, reply_markup=None):
+    """Отправить сообщение в чат: из команды (reply) или из callback."""
+    if update.message:
+        update.message.reply_text(text, reply_markup=reply_markup)
+    else:
+        if update.callback_query:
+            update.callback_query.answer()
+        context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup)
+
+
 def list_birthdays(update: Update, context: CallbackContext) -> None:
     """Показать все события, отсортированные по дням до наступления."""
     user_id = update.effective_user.id
-    logger.info(f"Команда /list от пользователя {user_id}")
+    logger.info(f"Список от пользователя {user_id}")
     birthdays = database.get_all_birthdays(user_id)
     logger.info(f"Получено записей из БД: {len(birthdays)}")
     
     if not birthdays:
-        update.message.reply_text(
-            "📋 Список пуст.\n\n"
-            "Добавьте первую запись командой /add"
+        _send_to_chat(update, context,
+            "📋 Список пуст.\n\nДобавьте первую запись командой /add или кнопкой «➕ Добавить».",
+            reply_markup=_menu_keyboard()
         )
         return
     
@@ -510,47 +545,51 @@ def list_birthdays(update: Update, context: CallbackContext) -> None:
         
         message += f"{idx}. {emoji} {name_display}\n   📅 {formatted_date} ({days_text}{age_text})\n\n"
     
-    message += "Управление: /add /delete /edit"
-    update.message.reply_text(message)
+    message += "Управление:"
+    _send_to_chat(update, context, message, reply_markup=_menu_keyboard())
+
+
+def _build_delete_list_message(birthdays):
+    """Сформировать текст списка для удаления."""
+    message = "🗑 Удаление записи\n\nВыберите номер записи для удаления:\n\n"
+    for idx, (birthday_id, full_name, birth_date, telegram_username, event_type, event_name) in enumerate(birthdays, 1):
+        birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
+        if event_type == 'holiday':
+            emoji, formatted_date = "🎊", birth_date_obj.strftime('%d.%m')
+            display_name = event_name if event_name else full_name
+        elif event_type == 'other':
+            emoji, formatted_date = "📅", birth_date_obj.strftime('%d.%m')
+            display_name = event_name if event_name else full_name
+        else:
+            emoji, formatted_date = "🎂", birth_date_obj.strftime('%d.%m.%Y')
+            display_name = full_name + (f" (@{telegram_username})" if telegram_username else "")
+        message += f"{idx}. {emoji} {display_name} - {formatted_date}\n"
+    message += "\nВведите номер записи или /cancel для отмены:"
+    return message
 
 
 def delete_start(update: Update, context: CallbackContext) -> int:
     """Начало диалога удаления записи."""
     user_id = update.effective_user.id
     birthdays = database.get_all_birthdays(user_id)
-    
     if not birthdays:
         update.message.reply_text("📋 Список пуст. Нечего удалять.")
         return ConversationHandler.END
-    
-    # Показываем список
-    message = "🗑 Удаление записи\n\nВыберите номер записи для удаления:\n\n"
-    
-    for idx, (birthday_id, full_name, birth_date, telegram_username, event_type, event_name) in enumerate(birthdays, 1):
-        birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
-        
-        # Выбираем эмодзи и формат даты в зависимости от типа события
-        if event_type == 'holiday':
-            emoji = "🎊"
-            formatted_date = birth_date_obj.strftime('%d.%m')
-            display_name = event_name if event_name else full_name
-        elif event_type == 'other':
-            emoji = "📅"
-            formatted_date = birth_date_obj.strftime('%d.%m')
-            display_name = event_name if event_name else full_name
-        else:  # birthday
-            emoji = "🎂"
-            formatted_date = birth_date_obj.strftime('%d.%m.%Y')
-            display_name = full_name
-            if telegram_username:
-                display_name += f" (@{telegram_username})"
-        
-        message += f"{idx}. {emoji} {display_name} - {formatted_date}\n"
-    
-    message += "\nВведите номер записи или /cancel для отмены:"
+    message = _build_delete_list_message(birthdays)
     update.message.reply_text(message)
-    
-    # Сохраняем список для дальнейшего использования
+    context.user_data['birthdays'] = birthdays
+    return WAITING_DELETE_ID
+
+
+def menu_delete_entry(update: Update, context: CallbackContext) -> int:
+    """Вход в удаление по inline-кнопке."""
+    update.callback_query.answer()
+    user_id = update.effective_user.id
+    birthdays = database.get_all_birthdays(user_id)
+    if not birthdays:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="📋 Список пуст. Нечего удалять.")
+        return ConversationHandler.END
+    context.bot.send_message(chat_id=update.effective_chat.id, text=_build_delete_list_message(birthdays))
     context.user_data['birthdays'] = birthdays
     return WAITING_DELETE_ID
 
@@ -583,42 +622,46 @@ def delete_execute(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
+def _build_edit_list_message(birthdays):
+    """Сформировать текст списка для редактирования."""
+    message = "✏️ Редактирование записи\n\nВыберите номер записи для редактирования:\n\n"
+    for idx, (birthday_id, full_name, birth_date, telegram_username, event_type, event_name) in enumerate(birthdays, 1):
+        birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
+        if event_type == 'holiday':
+            emoji, formatted_date = "🎊", birth_date_obj.strftime('%d.%m')
+            display_name = event_name if event_name else full_name
+        elif event_type == 'other':
+            emoji, formatted_date = "📅", birth_date_obj.strftime('%d.%m')
+            display_name = event_name if event_name else full_name
+        else:
+            emoji, formatted_date = "🎂", birth_date_obj.strftime('%d.%m.%Y')
+            display_name = full_name + (f" (@{telegram_username})" if telegram_username else "")
+        message += f"{idx}. {emoji} {display_name} - {formatted_date}\n"
+    message += "\nВведите номер записи или /cancel для отмены:"
+    return message
+
+
 def edit_start(update: Update, context: CallbackContext) -> int:
     """Начало диалога редактирования записи."""
     user_id = update.effective_user.id
     birthdays = database.get_all_birthdays(user_id)
-    
     if not birthdays:
         update.message.reply_text("📋 Список пуст. Нечего редактировать.")
         return ConversationHandler.END
-    
-    # Показываем список
-    message = "✏️ Редактирование записи\n\nВыберите номер записи для редактирования:\n\n"
-    
-    for idx, (birthday_id, full_name, birth_date, telegram_username, event_type, event_name) in enumerate(birthdays, 1):
-        birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
-        
-        # Выбираем эмодзи и формат даты в зависимости от типа события
-        if event_type == 'holiday':
-            emoji = "🎊"
-            formatted_date = birth_date_obj.strftime('%d.%m')
-            display_name = event_name if event_name else full_name
-        elif event_type == 'other':
-            emoji = "📅"
-            formatted_date = birth_date_obj.strftime('%d.%m')
-            display_name = event_name if event_name else full_name
-        else:  # birthday
-            emoji = "🎂"
-            formatted_date = birth_date_obj.strftime('%d.%m.%Y')
-            display_name = full_name
-            if telegram_username:
-                display_name += f" (@{telegram_username})"
-        
-        message += f"{idx}. {emoji} {display_name} - {formatted_date}\n"
-    
-    message += "\nВведите номер записи или /cancel для отмены:"
-    update.message.reply_text(message)
-    
+    update.message.reply_text(_build_edit_list_message(birthdays))
+    context.user_data['birthdays'] = birthdays
+    return WAITING_EDIT_ID
+
+
+def menu_edit_entry(update: Update, context: CallbackContext) -> int:
+    """Вход в редактирование по inline-кнопке."""
+    update.callback_query.answer()
+    user_id = update.effective_user.id
+    birthdays = database.get_all_birthdays(user_id)
+    if not birthdays:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="📋 Список пуст. Нечего редактировать.")
+        return ConversationHandler.END
+    context.bot.send_message(chat_id=update.effective_chat.id, text=_build_edit_list_message(birthdays))
     context.user_data['birthdays'] = birthdays
     return WAITING_EDIT_ID
 
@@ -1110,16 +1153,27 @@ def check_notifications(update: Update, context: CallbackContext) -> None:
     """Ручная проверка и отправка уведомлений (для тестирования)."""
     user = update.effective_user
     logger.info(f"Пользователь {user.id} запустил ручную проверку уведомлений")
-    
-    update.message.reply_text("🔍 Проверяю уведомления...")
-    
-    # Получаем бота из контекста
+    chat_id = update.effective_chat.id
     bot = context.bot
-    
-    # Запускаем проверку
+    if update.message:
+        update.message.reply_text("🔍 Проверяю уведомления...")
+    else:
+        update.callback_query.answer()
+        bot.send_message(chat_id=chat_id, text="🔍 Проверяю уведомления...")
     scheduler.check_and_send_notifications(bot)
-    
-    update.message.reply_text("✅ Проверка завершена! Уведомления отправлены если есть подходящие даты.")
+    if update.message:
+        update.message.reply_text("✅ Проверка завершена! Уведомления отправлены если есть подходящие даты.")
+    else:
+        bot.send_message(chat_id=chat_id, text="✅ Проверка завершена! Уведомления отправлены если есть подходящие даты.")
+
+
+def menu_callback(update: Update, context: CallbackContext) -> None:
+    """Обработка inline-кнопок меню: Список и Проверить уведомления."""
+    data = (update.callback_query.data or "").strip()
+    if data == "menu:list":
+        list_birthdays(update, context)
+    elif data == "menu:check":
+        check_notifications(update, context)
 
 
 # --- Генерация поздравлений через OpenAI ---
@@ -1463,6 +1517,9 @@ def main() -> None:
     # Обработчик команды /check (ручная проверка уведомлений)
     dispatcher.add_handler(CommandHandler('check', check_notifications))
     
+    # Inline-меню: Список и Проверить (Добавить/Удалить/Редактировать — в entry_points диалогов ниже)
+    dispatcher.add_handler(CallbackQueryHandler(menu_callback, pattern=r'^menu:(list|check)$'))
+    
     # Генерация поздравлений: кнопки под уведомлением и команда /prompt
     dispatcher.add_handler(CallbackQueryHandler(congratulate_callback, pattern=r'^congratulate'))
     dispatcher.add_handler(CommandHandler('prompt', prompt_command))
@@ -1470,7 +1527,10 @@ def main() -> None:
     
     # ConversationHandler для /add
     add_handler = ConversationHandler(
-        entry_points=[CommandHandler('add', add_start)],
+        entry_points=[
+            CommandHandler('add', add_start),
+            CallbackQueryHandler(menu_add_entry, pattern=r'^menu:add$'),
+        ],
         states={
             WAITING_EVENT_TYPE: [MessageHandler(Filters.text & ~Filters.command, add_event_type)],
             WAITING_EVENT_NAME: [MessageHandler(Filters.text & ~Filters.command, add_event_name)],
@@ -1484,7 +1544,10 @@ def main() -> None:
     
     # ConversationHandler для /delete
     delete_handler = ConversationHandler(
-        entry_points=[CommandHandler('delete', delete_start)],
+        entry_points=[
+            CommandHandler('delete', delete_start),
+            CallbackQueryHandler(menu_delete_entry, pattern=r'^menu:delete$'),
+        ],
         states={
             WAITING_DELETE_ID: [MessageHandler(Filters.text & ~Filters.command, delete_execute)],
         },
@@ -1494,7 +1557,10 @@ def main() -> None:
     
     # ConversationHandler для /edit
     edit_handler = ConversationHandler(
-        entry_points=[CommandHandler('edit', edit_start)],
+        entry_points=[
+            CommandHandler('edit', edit_start),
+            CallbackQueryHandler(menu_edit_entry, pattern=r'^menu:edit$'),
+        ],
         states={
             WAITING_EDIT_ID: [MessageHandler(Filters.text & ~Filters.command, edit_id)],
             WAITING_EDIT_NAME: [MessageHandler(Filters.text & ~Filters.command, edit_name)],
