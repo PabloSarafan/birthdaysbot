@@ -5,6 +5,7 @@ from datetime import datetime, date
 from uuid import uuid4
 from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram import InlineQueryResultArticle, InputTextMessageContent
+from telegram.error import Conflict
 from telegram.ext import (
     Updater, 
     CommandHandler, 
@@ -17,6 +18,7 @@ from telegram.ext import (
 from dotenv import load_dotenv
 import database
 import scheduler
+from scheduler import years_word
 
 # Загружаем переменные окружения из .env файла (для локальной разработки)
 load_dotenv()
@@ -490,8 +492,8 @@ def list_birthdays(update: Update, context: CallbackContext) -> None:
         
         # Добавляем информацию о возрасте для дней рождения
         age_text = ""
-        if age and event_type == 'birthday':
-            age_text = f", исполнится {age} лет"
+        if age is not None and event_type == 'birthday':
+            age_text = f", исполнится {age} {years_word(age)}"
         
         message += f"{idx}. {emoji} {name_display}\n   📅 {formatted_date} ({days_text}{age_text})\n\n"
     
@@ -1248,6 +1250,13 @@ def main() -> None:
     updater = Updater(token=bot_token, use_context=True)
     dispatcher = updater.dispatcher
     bot = updater.bot
+
+    # Для polling нужно снять webhook (иначе Telegram отдаёт Conflict)
+    try:
+        bot.delete_webhook()
+        logger.info("Webhook снят, используется long polling")
+    except Exception as e:
+        logger.warning("Не удалось снять webhook: %s", e)
     
     # Устанавливаем меню команд
     setup_commands(bot)
@@ -1317,6 +1326,17 @@ def main() -> None:
     dispatcher.add_handler(InlineQueryHandler(inline_query))
     logger.info("Inline режим активирован")
     
+    # Останавливаем этот экземпляр при конфликте (уже запущен другой экземпляр с тем же токеном)
+    def on_error(_update: object, context: CallbackContext) -> None:
+        if isinstance(context.error, Conflict):
+            logger.critical(
+                "Conflict: уже запущен другой экземпляр бота с этим токеном. "
+                "Остановите все остальные процессы (python/bot.py) и запустите только один."
+            )
+            updater.stop()
+
+    dispatcher.add_error_handler(on_error)
+
     # Запускаем бота
     logger.info("Бот запущен и готов к работе")
     updater.start_polling()

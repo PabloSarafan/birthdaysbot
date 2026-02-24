@@ -40,31 +40,42 @@ def calculate_days_until_birthday(birth_date_str: str) -> int:
         return -1
 
 
+def years_word(n: int) -> str:
+    """
+    Склонение слова «год» для русского языка: год / года / лет.
+    """
+    if n % 10 == 1 and n % 100 != 11:
+        return "год"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "года"
+    return "лет"
+
+
 def calculate_age(birth_date_str: str) -> int:
     """
-    Вычислить текущий возраст человека.
-    
+    Вычислить текущий возраст человека (на сегодня).
+
     Args:
         birth_date_str: Дата рождения в формате YYYY-MM-DD
-    
+
     Returns:
         Возраст в годах (или -1 если год не указан или ошибка)
     """
     try:
         birth_date = datetime.strptime(birth_date_str, '%Y-%m-%d').date()
         today = date.today()
-        
+
         # Если год 1900 или раньше, считаем что год не указан
         if birth_date.year <= 1900:
             return -1
-        
-        # Вычисляем возраст
+
+        # Вычисляем возраст на сегодня
         age = today.year - birth_date.year
-        
-        # Проверяем, был ли уже день рождения в этом году
+
+        # День рождения ещё не наступил в этом году — возраст на год меньше
         if (today.month, today.day) < (birth_date.month, birth_date.day):
             age -= 1
-        
+
         return age
     except Exception as e:
         logger.error(f"Ошибка при вычислении возраста: {e}")
@@ -111,25 +122,30 @@ def check_and_send_notifications(bot):
                     
                     # Формируем текст уведомления в зависимости от типа события и дней до события
                     if event_type == 'birthday':
-                        # Вычисляем возраст если указан год
+                        # Вычисляем возраст на сегодня (если указан год)
                         current_age = calculate_age(birth_date)
-                        
-                        # Для дня рождения сегодня показываем исполняющийся возраст
+
+                        # Возраст, который исполняется: сегодня уже current_age, в будущем — current_age + 1
                         if days_until == 0:
-                            if current_age > 0:
-                                # Возраст который исполняется сегодня = текущий возраст + 1
-                                age_text = f"\nИсполняется {current_age + 1} лет! "
+                            age_turning = current_age  # сегодня день рождения — возраст уже этот
+                        else:
+                            age_turning = current_age + 1  # в будущем — исполнится на 1 больше
+
+                        if days_until == 0:
+                            if current_age >= 0:
+                                yw = years_word(age_turning)
+                                age_text = f"\nИсполняется {age_turning} {yw}! "
                                 message = f"🎉 СЕГОДНЯ день рождения у {name_with_username} ({formatted_date})!{age_text}Не забудь поздравить! 🎂🎁"
                             else:
                                 message = f"🎉 СЕГОДНЯ день рождения у {name_with_username}!\nНе забудь поздравить! 🎂🎁"
                         elif days_until == 1:
-                            age_will_be = f" (исполнится {current_age + 1} лет)" if current_age > 0 else ""
+                            age_will_be = f" (исполнится {age_turning} {years_word(age_turning)})" if current_age >= 0 else ""
                             message = f"🎂 Не забудь поздравить {name_with_username} завтра ({formatted_date}){age_will_be}!"
                         elif days_until == 3:
-                            age_will_be = f" (исполнится {current_age + 1} лет)" if current_age > 0 else ""
+                            age_will_be = f" (исполнится {age_turning} {years_word(age_turning)})" if current_age >= 0 else ""
                             message = f"🎂 Не забудь поздравить {name_with_username} через 3 дня ({formatted_date}){age_will_be}!"
                         else:  # 7 дней
-                            age_will_be = f" (исполнится {current_age + 1} лет)" if current_age > 0 else ""
+                            age_will_be = f" (исполнится {age_turning} {years_word(age_turning)})" if current_age >= 0 else ""
                             message = f"🎂 Не забудь поздравить {name_with_username} через 7 дней ({formatted_date}){age_will_be}!"
                     
                     elif event_type == 'holiday':
