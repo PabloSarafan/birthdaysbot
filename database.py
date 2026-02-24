@@ -228,18 +228,18 @@ def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: 
         return False
 
 
-def get_all_birthdays_for_notifications() -> List[Tuple[int, str, str, Optional[str], str, Optional[str]]]:
+def get_all_birthdays_for_notifications() -> List[Tuple[int, int, str, str, Optional[str], str, Optional[str]]]:
     """
     Получить все дни рождения для отправки уведомлений.
     
     Returns:
-        Список кортежей (user_id, full_name, birth_date, telegram_username, event_type, event_name)
+        Список кортежей (id, user_id, full_name, birth_date, telegram_username, event_type, event_name)
     """
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT user_id, full_name, birth_date, telegram_username, event_type, event_name FROM birthdays')
+        cursor.execute('SELECT id, user_id, full_name, birth_date, telegram_username, event_type, event_name FROM birthdays')
         
         results = cursor.fetchall()
         conn.close()
@@ -249,29 +249,25 @@ def get_all_birthdays_for_notifications() -> List[Tuple[int, str, str, Optional[
         return []
 
 
-def get_birthday_by_id(birthday_id: int, user_id: int) -> Optional[Tuple[str, str, Optional[str], str, Optional[str]]]:
+def get_birthday_by_id(birthday_id: int, user_id: int) -> Optional[Tuple[int, str, str, Optional[str], str, Optional[str]]]:
     """
-    Получить информацию о конкретном дне рождения.
-    
-    Args:
-        birthday_id: ID записи
-        user_id: Telegram ID пользователя
+    Получить запись о дне рождения по id и user_id (для проверки прав).
     
     Returns:
-        Кортеж (full_name, birth_date, telegram_username, event_type, event_name) или None если не найдено
+        Кортеж (id, full_name, birth_date, telegram_username, event_type, event_name) или None
     """
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        
         cursor.execute(
-            'SELECT full_name, birth_date, telegram_username, event_type, event_name FROM birthdays WHERE id = ? AND user_id = ?',
+            'SELECT id, full_name, birth_date, telegram_username, event_type, event_name FROM birthdays WHERE id = ? AND user_id = ?',
             (birthday_id, user_id)
         )
-        
-        result = cursor.fetchone()
+        row = cursor.fetchone()
         conn.close()
-        return result
+        return row
     except Exception as e:
-        logger.error(f"Ошибка при получении дня рождения: {e}")
+        logger.error(f"Ошибка при получении дня рождения по id: {e}")
         return None
+
+

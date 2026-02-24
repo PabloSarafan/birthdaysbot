@@ -23,8 +23,10 @@ wheels/
 .installed.cfg
 *.egg
 
-# Environment variables
+# Environment variables (секреты)
 .env
+apibot.env
+openai.env
 
 # Database
 birthdays.db
