@@ -1,16 +1,15 @@
 # Используем Python 3.12 slim образ
 FROM python:3.12-slim
 
+# pkg_resources нужен для apscheduler (python-telegram-bot); в slim его нет — ставим системный пакет
+RUN apt-get update && apt-get install -y --no-install-recommends python3-setuptools \
+    && rm -rf /var/lib/apt/lists/*
+
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Копируем файл с зависимостями
+# Копируем файл с зависимостями и ставим зависимости
 COPY requirements.txt .
-
-# setuptools нужен для pkg_resources (используется apscheduler в python-telegram-bot)
-RUN pip install --no-cache-dir setuptools
-
-# Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем код бота и вспомогательные модули
