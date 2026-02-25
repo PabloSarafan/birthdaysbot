@@ -4,8 +4,9 @@ FROM python:3.12
 WORKDIR /app
 ENV PIP_ROOT_USER_ACTION=ignore
 COPY requirements.txt .
-# setuptools ставим через python -m pip, чтобы пакет попал в тот же Python, что запускает бота
-RUN python -m pip install --no-cache-dir setuptools \
+# setuptools в явный site-packages (на части хостов pip ставит не туда)
+RUN SITE=$(python -c "import site; print(site.getsitepackages()[0])") \
+    && python -m pip install --no-cache-dir --target="$SITE" setuptools \
     && python -m pip install --no-cache-dir -r requirements.txt \
     && python -c "import pkg_resources; print('pkg_resources OK')"
 
