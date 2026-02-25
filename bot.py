@@ -1,29 +1,4 @@
 import os
-import sys
-import subprocess
-import importlib
-
-# В некоторых Docker-образах нет pkg_resources (нужен для apscheduler) — ставим и подставляем из setuptools
-try:
-    import pkg_resources  # noqa: F401
-except ModuleNotFoundError:
-    _install_dir = "/tmp/bot_setuptools"
-    os.makedirs(_install_dir, exist_ok=True)
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--target", _install_dir, "setuptools"],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        print("pip install setuptools failed:", result.stderr or result.stdout, file=sys.stderr)
-        raise RuntimeError("Не удалось установить setuptools. Проверьте сеть и наличие pip в образе.") from None
-    sys.path.insert(0, _install_dir)
-    importlib.invalidate_caches()
-    import setuptools  # noqa: F401
-    import setuptools.pkg_resources as _pkg_resources
-    sys.modules["pkg_resources"] = _pkg_resources
-
 import logging
 import re
 from datetime import datetime, date
