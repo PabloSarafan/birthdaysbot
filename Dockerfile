@@ -1,5 +1,6 @@
-# Полный образ (не slim): в нём уже есть setuptools/pkg_resources, нужные для apscheduler
+# Базовый образ и setuptools — первым делом (pkg_resources нужен для apscheduler в python-telegram-bot)
 FROM python:3.12
+RUN pip install --no-cache-dir setuptools
 
 WORKDIR /app
 ENV PIP_ROOT_USER_ACTION=ignore
