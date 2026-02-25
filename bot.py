@@ -3,6 +3,7 @@ import logging
 import re
 from datetime import datetime, date
 from typing import Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -1683,17 +1684,32 @@ def main() -> None:
     dispatcher = updater.dispatcher
     bot = updater.bot
 
-    # Для polling нужно снять webhook (иначе Telegram отдаёт Conflict)
-    try:
-        bot.delete_webhook()
-        logger.info("Webhook снят, используется long polling")
-    except Unauthorized:
-        logger.critical("BOT_TOKEN отклонён Telegram (Unauthorized). Проверьте apibot.env и @BotFather.")
-        raise ValueError(
-            "Токен бота неверный или отозван. Проверьте BOT_TOKEN в apibot.env, получите новый токен в @BotFather (Telegram)."
+    # Режим продакшена: webhook (если заданы WEBHOOK_URL и PORT), иначе — long polling
+    webhook_url = os.getenv("WEBHOOK_URL", "").strip()
+    port_str = os.getenv("PORT", "").strip()
+    use_webhook = bool(webhook_url and port_str)
+    if use_webhook:
+        try:
+            port = int(port_str)
+        except ValueError:
+            logger.warning("PORT должен быть числом, используем long polling")
+            use_webhook = False
+    if port_str and not webhook_url:
+        logger.warning(
+            "PORT задан, но WEBHOOK_URL не задан — бот будет в режиме polling. "
+            "Чтобы бот отвечал на проде (CapRover и др.), задайте WEBHOOK_URL=https://ваш-домен (например https://birthdaybot.sarafannikov.work)"
         )
-    except Exception as e:
-        logger.warning("Не удалось снять webhook: %s", e)
+    if not use_webhook:
+        try:
+            bot.delete_webhook()
+            logger.info("Webhook снят, используется long polling")
+        except Unauthorized:
+            logger.critical("BOT_TOKEN отклонён Telegram (Unauthorized). Проверьте apibot.env и @BotFather.")
+            raise ValueError(
+                "Токен бота неверный или отозван. Проверьте BOT_TOKEN в apibot.env, получите новый токен в @BotFather (Telegram)."
+            )
+        except Exception as e:
+            logger.warning("Не удалось снять webhook: %s", e)
     
     # Устанавливаем меню команд
     setup_commands(bot)
@@ -1796,9 +1812,19 @@ def main() -> None:
 
     dispatcher.add_error_handler(on_error)
 
-    # Запускаем бота
-    logger.info("Бот запущен и готов к работе")
-    updater.start_polling()
+    # Запускаем бота: webhook на проде или polling локально
+    if use_webhook:
+        path = urlparse(webhook_url).path.strip("/") or ""
+        logger.info("Запуск в режиме webhook: %s (порт %s, path %r)", webhook_url, port, path or "/")
+        updater.start_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=path,
+            webhook_url=webhook_url,
+        )
+    else:
+        logger.info("Бот запущен и готов к работе (long polling)")
+        updater.start_polling()
     updater.idle()
 
 

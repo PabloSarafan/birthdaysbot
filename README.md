@@ -53,6 +53,39 @@ pip install -r requirements.txt
 python bot.py
 ```
 
+### 🚀 Деплой на продакшен (CapRover и др.)
+
+На сервере Telegram должен отправлять обновления по **webhook** (по умолчанию бот использует long polling). Задайте переменные окружения:
+
+- **`WEBHOOK_URL`** — полный HTTPS-адрес вашего бота, куда Telegram будет слать обновления (например: `https://birthdaybot.ваш-домен.com` или `https://ваш-домен.com/webhook`).
+- **`PORT`** — порт, на котором слушает приложение (на CapRover обычно задаётся автоматически).
+
+Если заданы и `WEBHOOK_URL`, и `PORT`, бот запускается в режиме webhook и сам вызывает `set_webhook`. Иначе используется long polling (как локально).
+
+**Важно:** должен быть только один способ получения обновлений: либо webhook на проде, либо polling локально. Не запускайте два экземпляра с одним и тем же токеном.
+
+#### Чек-лист для CapRover (бот не отвечает)
+
+1. **App Configs** → добавьте переменные окружения (не копируйте в репо `apibot.env` — в Docker его нет):
+   - `BOT_TOKEN` — токен от @BotFather
+   - `WEBHOOK_URL` — **ровно** ваш публичный URL, например: `https://birthdaybot.sarafannikov.work` (без слэша в конце)
+   - `PORT` — обычно CapRover подставляет сам (80); если нет — укажите `80` (как в HTTP Settings → Container HTTP Port)
+
+2. После сохранения конфига **сделайте перезапуск приложения** (Deployment → Restart).
+
+3. Откройте **Logs** и убедитесь, что есть строка:  
+   `Запуск в режиме webhook: https://birthdaybot.sarafannikov.work (порт 80, path ...)`  
+   Если видите «Webhook снят, используется long polling» — значит `WEBHOOK_URL` или `PORT` не подхватились; проверьте App Configs.
+
+4. Проверка webhook в Telegram: откройте в браузере или через curl:  
+   `https://api.telegram.org/bot<ВАШ_ТОКЕН>/getWebhookInfo`  
+   Подставьте токен **без пробелов и переносов** (одна строка: `bot` + токен + `/getWebhookInfo`).  
+   - В ответе должно быть `"ok":true` и `"url":"https://birthdaybot.sarafannikov.work/"`.  
+   - Если пришло `{"ok":false,"error_code":404}` — проверьте URL: токен скопирован целиком, нет лишнего слэша или пробела.  
+   - Если открывали **свой** домен (https://birthdaybot.sarafannikov.work) в браузере и получили 404 — это нормально: бот принимает только POST от Telegram, GET в браузере не обрабатывается.
+
+5. При тесте прода **остановите** локальный запуск бота (`python bot.py`), иначе обновления может забирать только один экземпляр.
+
 ## 🤖 Получение токена бота
 
 1. Откройте Telegram и найдите [@BotFather](https://t.me/BotFather)
