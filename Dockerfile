@@ -5,7 +5,8 @@ WORKDIR /app
 ENV PIP_ROOT_USER_ACTION=ignore
 COPY requirements.txt .
 # setuptools ставим первым в одной команде с requirements — иначе в некоторых образах нет pkg_resources
-RUN pip install --no-cache-dir setuptools && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir setuptools && pip install --no-cache-dir -r requirements.txt \
+    && python -c "import pkg_resources; print('pkg_resources OK')"
 
 # Копируем код бота и вспомогательные модули
 COPY bot.py .
