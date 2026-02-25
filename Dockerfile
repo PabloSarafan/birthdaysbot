@@ -1,5 +1,7 @@
 # Базовый образ и setuptools — первым делом (pkg_resources нужен для apscheduler в python-telegram-bot)
 FROM python:3.12
+# Чтобы принудительно пересобрать без кэша: измените число (например на 2), закоммитьте и сделайте caprover deploy
+ARG REBUILD=2
 RUN pip install --no-cache-dir setuptools
 
 WORKDIR /app
