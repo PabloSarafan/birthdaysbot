@@ -1,13 +1,10 @@
-# Используем Python 3.12 slim образ
-FROM python:3.12-slim
+# Полный образ (не slim): в нём уже есть setuptools/pkg_resources, нужные для apscheduler
+FROM python:3.12
 
-# Устанавливаем рабочую директорию
 WORKDIR /app
-
-# setuptools (pkg_resources) нужен для apscheduler — ставим через pip того же Python, что запускает бота
 ENV PIP_ROOT_USER_ACTION=ignore
 COPY requirements.txt .
-RUN pip install --no-cache-dir setuptools && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Копируем код бота и вспомогательные модули
 COPY bot.py .
