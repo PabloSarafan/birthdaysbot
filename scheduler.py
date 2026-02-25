@@ -104,11 +104,18 @@ def check_and_send_notifications(bot):
         
         notifications_sent = 0
         
-        for birthday_id, user_id, full_name, birth_date, telegram_username, event_type, event_name in birthdays:
+        for birthday_id, user_id, full_name, birth_date, telegram_username, event_type, event_name, remind_days_str in birthdays:
             days_until = calculate_days_until_birthday(birth_date)
+            # Парсим дни напоминаний для этого события (например "0,1,3,7" -> {0,1,3,7})
+            try:
+                remind_days_set = {int(x.strip()) for x in (remind_days_str or "0,1,3,7").split(",") if x.strip().isdigit()}
+            except Exception:
+                remind_days_set = {0, 1, 3, 7}
+            if not remind_days_set:
+                remind_days_set = {0}
             
-            # Проверяем нужно ли отправить уведомление
-            if days_until in [0, 1, 3, 7]:
+            # Проверяем нужно ли отправить уведомление (в день события напоминаем по умолчанию)
+            if days_until in remind_days_set:
                 try:
                     # Форматируем дату для отображения
                     birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
