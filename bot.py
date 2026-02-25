@@ -3,12 +3,14 @@ import sys
 import subprocess
 import importlib
 
-# В некоторых Docker-образах нет pkg_resources — ставим при старте до импорта telegram/apscheduler
+# В некоторых Docker-образах нет pkg_resources (нужен для apscheduler) — ставим в каталог и добавляем в path
 try:
     import pkg_resources  # noqa: F401
 except ModuleNotFoundError:
+    _install_dir = os.path.join(os.path.dirname(__file__), ".pkg_resources_lib")
+    os.makedirs(_install_dir, exist_ok=True)
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-cache-dir", "setuptools"],
+        [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--target", _install_dir, "setuptools"],
         capture_output=True,
         text=True,
         timeout=120,
@@ -16,6 +18,7 @@ except ModuleNotFoundError:
     if result.returncode != 0:
         print("pip install setuptools failed:", result.stderr or result.stdout, file=sys.stderr)
         raise RuntimeError("Не удалось установить setuptools. Проверьте сеть и наличие pip в образе.") from None
+    sys.path.insert(0, _install_dir)
     importlib.invalidate_caches()
     import pkg_resources  # noqa: F401
 
