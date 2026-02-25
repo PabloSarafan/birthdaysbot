@@ -7,6 +7,9 @@ WORKDIR /app
 # Копируем файл с зависимостями
 COPY requirements.txt .
 
+# setuptools нужен для pkg_resources (используется apscheduler в python-telegram-bot)
+RUN pip install --no-cache-dir setuptools
+
 # Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
