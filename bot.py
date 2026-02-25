@@ -7,7 +7,7 @@ from uuid import uuid4
 from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import InlineQueryResultArticle, InputTextMessageContent
-from telegram.error import Conflict
+from telegram.error import Conflict, Unauthorized
 from telegram.ext import (
     Updater, 
     CommandHandler, 
@@ -16,8 +16,9 @@ from telegram.ext import (
     CallbackContext,
     ConversationHandler,
     InlineQueryHandler,
-    CallbackQueryHandler
+    CallbackQueryHandler,
 )
+from telegram.ext.filters import MessageFilter
 from dotenv import load_dotenv
 import database
 import scheduler
@@ -45,10 +46,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Состояния для ConversationHandler
-WAITING_NAME, WAITING_EVENT_TYPE, WAITING_EVENT_NAME, WAITING_DATE, WAITING_USERNAME = range(5)
-WAITING_DELETE_ID, WAITING_EDIT_ID, WAITING_EDIT_NAME, WAITING_EDIT_DATE, WAITING_EDIT_USERNAME = range(5, 10)
-WAITING_EDIT_EVENT_TYPE, WAITING_EDIT_EVENT_NAME = range(10, 12)
+WAITING_NAME, WAITING_EVENT_TYPE, WAITING_EVENT_NAME, WAITING_DATE, WAITING_REMIND_DAYS, WAITING_USERNAME = range(6)
+WAITING_DELETE_ID, WAITING_EDIT_ID, WAITING_EDIT_NAME, WAITING_EDIT_DATE, WAITING_EDIT_REMIND_DAYS, WAITING_EDIT_USERNAME = range(6, 12)
+WAITING_EDIT_EVENT_TYPE, WAITING_EDIT_EVENT_NAME = range(12, 14)
 WAITING_IMPORT_TEXT, WAITING_IMPORT_CONFIRMATION = range(100, 102)
+
+
+def _parse_remind_days(text: str):
+    """Парсит строку дней напоминаний (например '0,1,3,7') в отсортированный список int. 0 = в день события."""
+    parts = [x.strip() for x in (text or "").split(",") if x.strip()]
+    result = []
+    for p in parts:
+        if p.isdigit():
+            d = int(p)
+            if 0 <= d <= 365 and d not in result:
+                result.append(d)
+    result.sort()
+    return result if result else [0]
 
 
 def _menu_keyboard():
@@ -199,63 +213,95 @@ def parse_bulk_import(text: str):
 
 ADD_PROMPT_TEXT = (
     "📝 Добавление нового события.\n\n"
-    "Выберите тип события:\n\n"
-    "1 - День рождения (с указанием имени и даты рождения)\n"
-    "2 - Праздник (например: Новый Год, 8 Марта)\n"
-    "3 - Другое событие (годовщина, важная дата)\n\n"
-    "Введите номер (1, 2 или 3)\n\nОтменить: /cancel"
+    "Выберите тип события:"
 )
+
+ADD_EVENT_TYPE_KEYBOARD = InlineKeyboardMarkup([
+    [
+        InlineKeyboardButton("🎂 День рождения", callback_data="add_type:birthday"),
+        InlineKeyboardButton("🎊 Праздник", callback_data="add_type:holiday"),
+    ],
+    [InlineKeyboardButton("📅 Другое событие", callback_data="add_type:other")],
+])
 
 
 def add_start(update: Update, context: CallbackContext) -> int:
     """Начало диалога добавления события."""
-    update.message.reply_text(ADD_PROMPT_TEXT)
+    update.message.reply_text(
+        ADD_PROMPT_TEXT + "\n\nОтменить: /cancel",
+        reply_markup=ADD_EVENT_TYPE_KEYBOARD,
+    )
     return WAITING_EVENT_TYPE
 
 
 def menu_add_entry(update: Update, context: CallbackContext) -> int:
     """Вход в добавление события по inline-кнопке."""
     update.callback_query.answer()
-    context.bot.send_message(chat_id=update.effective_chat.id, text=ADD_PROMPT_TEXT)
+    context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=ADD_PROMPT_TEXT + "\n\nОтменить: /cancel",
+        reply_markup=ADD_EVENT_TYPE_KEYBOARD,
+    )
     return WAITING_EVENT_TYPE
 
 
-def add_event_type(update: Update, context: CallbackContext) -> int:
-    """Обработка выбора типа события."""
-    choice = update.message.text.strip()
-    
-    if choice == '1':
-        context.user_data['event_type'] = 'birthday'
-        update.message.reply_text(
+def _apply_event_type_choice(context: CallbackContext, event_type: str, chat_id: int, reply_method) -> int:
+    """Устанавливает тип события и отправляет следующий вопрос. Возвращает следующее состояние."""
+    context.user_data['event_type'] = event_type
+    if event_type == 'birthday':
+        reply_method(
             "🎂 Вы выбрали: День рождения\n\n"
             "Введите имя или ФИО человека (например: Иван Иванов)\n\n"
             "Отменить: /cancel"
         )
         return WAITING_NAME
-    elif choice == '2':
-        context.user_data['event_type'] = 'holiday'
-        update.message.reply_text(
+    if event_type == 'holiday':
+        reply_method(
             "🎊 Вы выбрали: Праздник\n\n"
             "Введите название праздника (например: Новый Год, 8 Марта)\n\n"
             "Отменить: /cancel"
         )
         return WAITING_EVENT_NAME
-    elif choice == '3':
-        context.user_data['event_type'] = 'other'
-        update.message.reply_text(
+    if event_type == 'other':
+        reply_method(
             "📅 Вы выбрали: Другое событие\n\n"
             "Введите название события (например: Годовщина свадьбы)\n\n"
             "Отменить: /cancel"
         )
         return WAITING_EVENT_NAME
-    else:
-        update.message.reply_text(
-            "❌ Пожалуйста, введите 1, 2 или 3.\n\n"
-            "1 - День рождения\n"
-            "2 - Праздник\n"
-            "3 - Другое событие"
-        )
+    return WAITING_EVENT_TYPE
+
+
+def add_event_type_callback(update: Update, context: CallbackContext) -> int:
+    """Обработка выбора типа события по inline-кнопке."""
+    query = update.callback_query
+    query.answer()
+    data = (query.data or "").strip()
+    if not data.startswith("add_type:"):
         return WAITING_EVENT_TYPE
+    event_type = data.split(":", 1)[1]
+    if event_type not in ("birthday", "holiday", "other"):
+        return WAITING_EVENT_TYPE
+
+    def reply(text):
+        context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+    return _apply_event_type_choice(context, event_type, update.effective_chat.id, reply)
+
+
+def add_event_type(update: Update, context: CallbackContext) -> int:
+    """Обработка выбора типа события (ввод цифрой 1, 2 или 3)."""
+    choice = update.message.text.strip()
+    if choice == '1':
+        return _apply_event_type_choice(context, 'birthday', update.effective_chat.id, update.message.reply_text)
+    if choice == '2':
+        return _apply_event_type_choice(context, 'holiday', update.effective_chat.id, update.message.reply_text)
+    if choice == '3':
+        return _apply_event_type_choice(context, 'other', update.effective_chat.id, update.message.reply_text)
+    update.message.reply_text(
+        "❌ Пожалуйста, выберите тип кнопкой ниже или введите 1, 2 или 3.\n\n"
+        "🎂 День рождения · 🎊 Праздник · 📅 Другое событие"
+    )
+    return WAITING_EVENT_TYPE
 
 
 def add_event_name(update: Update, context: CallbackContext) -> int:
@@ -335,23 +381,18 @@ def add_date(update: Update, context: CallbackContext) -> int:
         context.user_data['birth_date'] = birth_date.strftime('%Y-%m-%d')
         context.user_data['formatted_date'] = formatted_date
         
-        # Для дня рождения спрашиваем username, для остальных - сохраняем сразу
+        # Для дня рождения спрашиваем дни напоминаний, затем username; для остальных — сохраняем сразу
         if event_type == 'birthday':
-            # Создаем кнопку для пропуска
-            keyboard = [
-                [KeyboardButton("⏭ Пропустить")]
-            ]
-            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-            
             update.message.reply_text(
                 f"✅ Дата: {date_str}\n\n"
-                "Добавьте Telegram контакт:\n\n"
-                "📱 Нажмите 📎 (скрепка внизу) → Контакт → Выберите человека\n\n"
-                "⏭ Или нажмите 'Пропустить'\n\n"
-                "Отменить: /cancel",
-                reply_markup=reply_markup
+                "За сколько дней до события напоминать? (через запятую)\n"
+                "0 = в сам день события.\n\n"
+                "Примеры: 0 — только в день; 0,1,3,7 — за неделю, 3 дня, день и в день.\n"
+                "По умолчанию: 0,1,3,7\n\n"
+                "Введите числа через запятую или /skip для значения по умолчанию:\n\n"
+                "Отменить: /cancel"
             )
-            return WAITING_USERNAME
+            return WAITING_REMIND_DAYS
         else:
             # Для праздников и других событий сохраняем сразу
             full_name = context.user_data.get('full_name')
@@ -359,13 +400,13 @@ def add_date(update: Update, context: CallbackContext) -> int:
             user_id = update.effective_user.id
             
             if database.add_birthday(user_id, full_name, birth_date.strftime('%Y-%m-%d'), 
-                                    None, event_type, event_name):
+                                    None, event_type, event_name, database.DEFAULT_REMIND_DAYS):
                 event_emoji = "🎊" if event_type == 'holiday' else "📅"
                 update.message.reply_text(
                     f"✅ Успешно сохранено!\n\n"
                     f"{event_emoji} {event_name}\n"
                     f"📅 {date_str}\n\n"
-                    f"Я буду напоминать вам за 7, 3 и 1 день до события."
+                    f"Напоминания: за 0, 1, 3 и 7 дней до события (можно изменить в /edit)."
                 )
                 logger.info(f"Пользователь {user_id} добавил событие: {event_name} ({event_type}) - {date_str}")
             else:
@@ -389,6 +430,32 @@ def add_date(update: Update, context: CallbackContext) -> int:
                 "Попробуйте еще раз:"
             )
         return WAITING_DATE
+
+
+def add_remind_days(update: Update, context: CallbackContext) -> int:
+    """Получение дней напоминаний и запрос username (для дня рождения)."""
+    text = update.message.text.strip()
+    if text.lower() == "/skip" or not text:
+        context.user_data["remind_days"] = database.DEFAULT_REMIND_DAYS
+    else:
+        days_list = _parse_remind_days(text)
+        if not days_list:
+            update.message.reply_text(
+                "❌ Введите числа через запятую (0 = в день события), например: 0,1,3,7\n"
+                "Или /skip для значения по умолчанию."
+            )
+            return WAITING_REMIND_DAYS
+        context.user_data["remind_days"] = ",".join(map(str, days_list))
+    
+    keyboard = [[KeyboardButton("⏭ Пропустить")]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    update.message.reply_text(
+        "Добавьте Telegram контакт:\n\n"
+        "📱 Нажмите 📎 → Контакт → Выберите человека\n\n"
+        "⏭ Или нажмите 'Пропустить'\n\nОтменить: /cancel",
+        reply_markup=reply_markup
+    )
+    return WAITING_USERNAME
 
 
 def add_username(update: Update, context: CallbackContext) -> int:
@@ -437,14 +504,15 @@ def add_username(update: Update, context: CallbackContext) -> int:
         )
         return WAITING_USERNAME
     
-    # Сохраняем в базу данных
-    if database.add_birthday(user_id, full_name, birth_date, telegram_username, event_type, event_name):
+    # Сохраняем в базу данных (дни напоминаний из предыдущего шага или по умолчанию)
+    remind_days = context.user_data.get("remind_days") or database.DEFAULT_REMIND_DAYS
+    if database.add_birthday(user_id, full_name, birth_date, telegram_username, event_type, event_name, remind_days):
         username_text = f" (@{telegram_username})" if telegram_username else ""
         update.message.reply_text(
             f"✅ Успешно сохранено!\n\n"
             f"👤 {full_name}{username_text}\n"
             f"🎂 {formatted_date}\n\n"
-            f"Я буду напоминать вам за 7, 3 и 1 день до дня рождения.",
+            f"Напоминания: за {remind_days.replace(',', ', ')} дн. до события (0 = в день). Изменить: /edit.",
             reply_markup=ReplyKeyboardRemove()  # Убираем клавиатуру
         )
         logger.info(f"Пользователь {user_id} добавил: {full_name}{username_text} - {formatted_date}")
@@ -487,7 +555,7 @@ def list_birthdays(update: Update, context: CallbackContext) -> None:
     today = date.today()
     birthdays_with_days = []
     
-    for birthday_id, full_name, birth_date, telegram_username, event_type, event_name in birthdays:
+    for birthday_id, full_name, birth_date, telegram_username, event_type, event_name, _ in birthdays:
         days_until = scheduler.calculate_days_until_birthday(birth_date)
         birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d').date()
         
@@ -552,7 +620,7 @@ def list_birthdays(update: Update, context: CallbackContext) -> None:
 def _build_delete_list_message(birthdays):
     """Сформировать текст списка для удаления."""
     message = "🗑 Удаление записи\n\nВыберите номер записи для удаления:\n\n"
-    for idx, (birthday_id, full_name, birth_date, telegram_username, event_type, event_name) in enumerate(birthdays, 1):
+    for idx, (birthday_id, full_name, birth_date, telegram_username, event_type, event_name, _) in enumerate(birthdays, 1):
         birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
         if event_type == 'holiday':
             emoji, formatted_date = "🎊", birth_date_obj.strftime('%d.%m')
@@ -601,7 +669,7 @@ def delete_execute(update: Update, context: CallbackContext) -> int:
         birthdays = context.user_data.get('birthdays', [])
         
         if 0 <= index < len(birthdays):
-            birthday_id, full_name, birth_date, telegram_username, event_type, event_name = birthdays[index]
+            birthday_id, full_name, birth_date, telegram_username, event_type, event_name, _ = birthdays[index]
             user_id = update.effective_user.id
             
             # Определяем что именно удаляем для отображения
@@ -625,7 +693,7 @@ def delete_execute(update: Update, context: CallbackContext) -> int:
 def _build_edit_list_message(birthdays):
     """Сформировать текст списка для редактирования."""
     message = "✏️ Редактирование записи\n\nВыберите номер записи для редактирования:\n\n"
-    for idx, (birthday_id, full_name, birth_date, telegram_username, event_type, event_name) in enumerate(birthdays, 1):
+    for idx, (birthday_id, full_name, birth_date, telegram_username, event_type, event_name, _) in enumerate(birthdays, 1):
         birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
         if event_type == 'holiday':
             emoji, formatted_date = "🎊", birth_date_obj.strftime('%d.%m')
@@ -673,13 +741,14 @@ def edit_id(update: Update, context: CallbackContext) -> int:
         birthdays = context.user_data.get('birthdays', [])
         
         if 0 <= index < len(birthdays):
-            birthday_id, full_name, birth_date, telegram_username, event_type, event_name = birthdays[index]
+            birthday_id, full_name, birth_date, telegram_username, event_type, event_name, remind_days = birthdays[index]
             context.user_data['edit_id'] = birthday_id
             context.user_data['old_name'] = full_name
             context.user_data['old_date'] = birth_date
             context.user_data['old_username'] = telegram_username
             context.user_data['old_event_type'] = event_type if event_type else 'birthday'
             context.user_data['old_event_name'] = event_name
+            context.user_data['old_remind_days'] = remind_days or database.DEFAULT_REMIND_DAYS
             
             # Определяем что редактируем в зависимости от типа события
             if event_type in ['holiday', 'other']:
@@ -776,37 +845,26 @@ def edit_date(update: Update, context: CallbackContext) -> int:
         context.user_data['new_date'] = birth_date.strftime('%Y-%m-%d')
         context.user_data['formatted_date'] = formatted_date
         
-        # Для дня рождения спрашиваем username, для остальных - сохраняем сразу
+        # Для дня рождения спрашиваем дни напоминаний, затем username; для остальных — сохраняем сразу
         if event_type == 'birthday':
-            old_username = context.user_data.get('old_username')
-            username_info = f" (@{old_username})" if old_username else " (нет)"
-            
-            # Создаем кнопку для пропуска
-            keyboard = [
-                [KeyboardButton("⏭ Пропустить")]
-            ]
-            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-            
+            old_remind = context.user_data.get('old_remind_days') or database.DEFAULT_REMIND_DAYS
             update.message.reply_text(
                 f"✅ Дата: {date_str}\n\n"
-                f"Текущий username:{username_info}\n\n"
-                f"Обновите контакт:\n\n"
-                f"📱 Отправить контакт:\n"
-                f"   Нажмите 📎 → Контакт → Выберите человека из списка\n\n"
-                f"⏭ Или нажмите 'Пропустить' (оставить текущий)\n\n"
-                f"Отменить: /cancel",
-                reply_markup=reply_markup
+                f"Текущие дни напоминаний: {old_remind} (0 = в день события)\n\n"
+                f"Введите новые значения через запятую (например 0,1,3,7) или /skip чтобы не менять:\n\n"
+                f"Отменить: /cancel"
             )
-            return WAITING_EDIT_USERNAME
+            return WAITING_EDIT_REMIND_DAYS
         else:
             # Для праздников и других событий сохраняем сразу
             birthday_id = context.user_data.get('edit_id')
             new_name = context.user_data.get('new_name')
             new_event_name = context.user_data.get('new_event_name')
+            old_remind = context.user_data.get('old_remind_days') or database.DEFAULT_REMIND_DAYS
             user_id = update.effective_user.id
             
             if database.update_birthday(birthday_id, user_id, new_name, birth_date.strftime('%Y-%m-%d'), 
-                                       None, event_type, new_event_name):
+                                       None, event_type, new_event_name, old_remind):
                 event_emoji = "🎊" if event_type == 'holiday' else "📅"
                 update.message.reply_text(
                     f"✅ Запись обновлена!\n\n"
@@ -832,6 +890,33 @@ def edit_date(update: Update, context: CallbackContext) -> int:
                 "Используйте формат ДД.ММ.ГГГГ (например: 15.03.1990):"
             )
         return WAITING_EDIT_DATE
+
+
+def edit_remind_days(update: Update, context: CallbackContext) -> int:
+    """Получение новых дней напоминаний и запрос username (при редактировании)."""
+    text = update.message.text.strip()
+    if text.lower() == "/skip" or not text:
+        context.user_data["new_remind_days"] = context.user_data.get("old_remind_days") or database.DEFAULT_REMIND_DAYS
+    else:
+        days_list = _parse_remind_days(text)
+        if not days_list:
+            update.message.reply_text(
+                "❌ Введите числа через запятую (0 = в день события), например: 0,1,3,7\n"
+                "Или /skip чтобы не менять."
+            )
+            return WAITING_EDIT_REMIND_DAYS
+        context.user_data["new_remind_days"] = ",".join(map(str, days_list))
+    
+    old_username = context.user_data.get('old_username')
+    username_info = f" (@{old_username})" if old_username else " (нет)"
+    keyboard = [[KeyboardButton("⏭ Пропустить")]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    update.message.reply_text(
+        f"Текущий username:{username_info}\n\n"
+        f"Обновите контакт (📎 → Контакт) или нажмите 'Пропустить'.\n\nОтменить: /cancel",
+        reply_markup=reply_markup
+    )
+    return WAITING_EDIT_USERNAME
 
 
 def edit_username(update: Update, context: CallbackContext) -> int:
@@ -882,13 +967,15 @@ def edit_username(update: Update, context: CallbackContext) -> int:
         )
         return WAITING_EDIT_USERNAME
     
-    # Обновляем запись
-    if database.update_birthday(birthday_id, user_id, new_name, new_date, telegram_username, event_type, new_event_name):
+    # Обновляем запись (дни напоминаний из шага edit_remind_days)
+    new_remind_days = context.user_data.get("new_remind_days")
+    if database.update_birthday(birthday_id, user_id, new_name, new_date, telegram_username, event_type, new_event_name, new_remind_days):
         username_text = f" (@{telegram_username})" if telegram_username else ""
+        remind_info = f"\nНапоминания: за {new_remind_days.replace(',', ', ')} дн." if new_remind_days else ""
         update.message.reply_text(
             f"✅ Запись обновлена!\n\n"
             f"👤 {new_name}{username_text}\n"
-            f"🎂 {formatted_date}",
+            f"🎂 {formatted_date}{remind_info}",
             reply_markup=ReplyKeyboardRemove()  # Убираем клавиатуру
         )
         logger.info(f"Пользователь {user_id} обновил запись {birthday_id}")
@@ -1237,14 +1324,23 @@ def generate_congratulation(full_name: str, custom_prompt: Optional[str] = None)
         return "Ошибка при генерации. Попробуйте позже или проверьте openai.env."
 
 
+# Пресеты промптов для кнопок «Свой промпт»
+PROMPT_PRESETS = {
+    "humor": "короткое и с юмором",
+    "touching": "трогательное и душевное",
+    "family": "для близкого человека, тёплое",
+}
+
+
 def congratulate_callback(update: Update, context: CallbackContext) -> None:
-    """Обработка нажатия кнопок «Сгенерировать поздравление» и «Свой промпт»."""
+    """Обработка нажатия кнопок «Сгенерировать поздравление», «Свой промпт» и пресетов."""
     query = update.callback_query
     query.answer()
     
     data = (query.data or "").strip()
     user_id = update.effective_user.id
     
+    # «Свой промпт» — показываем inline-кнопки (пресеты + свой текст)
     if data.startswith("congratulate_prompt:"):
         birthday_id_str = data.split(":", 1)[1]
         try:
@@ -1257,14 +1353,61 @@ def congratulate_callback(update: Update, context: CallbackContext) -> None:
             query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
             return
         full_name = record[1]
-        sent = query.message.reply_text(
-            f"✏️ Чтобы сгенерировать поздравление для {full_name} с своим текстом, "
-            "ответьте на это сообщение текстом вашего промпта.\n\n"
-            "Например: это моя мама, хочу красивое поздравление с юбилеем"
+        keyboard = [
+            [
+                InlineKeyboardButton("😄 С юмором", callback_data=f"congratulate_custom:{birthday_id}:humor"),
+                InlineKeyboardButton("💝 Трогательное", callback_data=f"congratulate_custom:{birthday_id}:touching"),
+            ],
+            [
+                InlineKeyboardButton("👨‍👩‍👧 Для близкого", callback_data=f"congratulate_custom:{birthday_id}:family"),
+                InlineKeyboardButton("✏️ Свой текст", callback_data=f"congratulate_custom_text:{birthday_id}"),
+            ],
+        ]
+        query.message.reply_text(
+            f"✏️ Выберите стиль поздравления для {full_name} или введите свой промпт:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
-        # Сохраняем привязку «сообщение → запись», чтобы по ответу не показывать id
-        key = (sent.chat_id, sent.message_id)
-        context.bot_data.setdefault("prompt_wait", {})[key] = (birthday_id, user_id)
+        return
+    
+    # Пресет: сразу генерируем с выбранным промптом
+    if data.startswith("congratulate_custom:"):
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            return
+        try:
+            birthday_id = int(parts[1])
+        except ValueError:
+            return
+        preset_key = parts[2]
+        preset_text = PROMPT_PRESETS.get(preset_key)
+        if not preset_text:
+            return
+        record = database.get_birthday_by_id(birthday_id, user_id)
+        if not record:
+            query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
+            return
+        full_name = record[1]
+        query.message.reply_text("⏳ Генерирую поздравление...")
+        text = generate_congratulation(full_name, custom_prompt=preset_text)
+        query.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
+        return
+    
+    # «Свой текст» — ждём следующее сообщение пользователя (reply не обязателен)
+    if data.startswith("congratulate_custom_text:"):
+        birthday_id_str = data.split(":", 1)[1]
+        try:
+            birthday_id = int(birthday_id_str)
+        except ValueError:
+            query.message.reply_text("Ошибка: неверные данные.")
+            return
+        record = database.get_birthday_by_id(birthday_id, user_id)
+        if not record:
+            query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
+            return
+        context.bot_data.setdefault("prompt_wait_user", {})[user_id] = (birthday_id, query.message.chat_id)
+        query.message.reply_text(
+            "✏️ Напишите ваш промпт в чат (одним сообщением). Ответ на это сообщение не обязателен."
+        )
         return
     
     if not data.startswith("congratulate:"):
@@ -1289,24 +1432,65 @@ def congratulate_callback(update: Update, context: CallbackContext) -> None:
     query.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
 
 
+class PromptWaitFilter(MessageFilter):
+    """Фильтр: True, если ждём от пользователя текст промпта (по reply или по prompt_wait_user)."""
+
+    def __init__(self, dispatcher):
+        self._dispatcher = dispatcher
+
+    def filter(self, message):
+        if not message or not (message.text or "").strip():
+            return False
+        bot_data = self._dispatcher.bot_data
+        uid = message.from_user.id if message.from_user else None
+        cid = message.chat.id if message.chat else None
+        if not uid or cid is None:
+            return False
+        if uid in bot_data.get("prompt_wait_user", {}):
+            _, stored_chat_id = bot_data["prompt_wait_user"][uid]
+            if stored_chat_id == cid:
+                return True
+        if message.reply_to_message:
+            reply_to = message.reply_to_message
+            if reply_to.from_user and reply_to.from_user.id == self._dispatcher.bot.id:
+                key = (cid, reply_to.message_id)
+                if key in bot_data.get("prompt_wait", {}):
+                    return True
+        return False
+
+
 def prompt_reply_handler(update: Update, context: CallbackContext) -> None:
-    """Обработка ответа на сообщение «введите промпт» — генерация по своему промпту без показа id."""
-    if not update.message or not update.message.reply_to_message:
+    """Обработка ввода промпта: по ответу на сообщение (reply) или по ожиданию из prompt_wait_user (reply не обязателен)."""
+    if not update.message or not (update.message.text or "").strip():
         return
-    reply_to = update.message.reply_to_message
-    if reply_to.from_user.id != context.bot.id:
-        return
-    key = (update.effective_chat.id, reply_to.message_id)
-    prompt_wait = context.bot_data.get("prompt_wait") or {}
-    if key not in prompt_wait:
-        return
-    birthday_id, user_id = prompt_wait.pop(key)
-    if update.effective_user.id != user_id:
-        return
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     prompt_text = (update.message.text or "").strip()
-    if not prompt_text:
-        update.message.reply_text("Напишите текст промпта.")
+    bot_data = context.bot_data
+    birthday_id = None
+    source = None
+
+    # Путь 1: пользователь в списке ожидания (нажал «Свой текст») — reply не обязателен
+    prompt_wait_user = bot_data.get("prompt_wait_user") or {}
+    if user_id in prompt_wait_user:
+        birthday_id, stored_chat_id = prompt_wait_user.pop(user_id)
+        if stored_chat_id == chat_id:
+            source = "user"
+
+    # Путь 2: ответ на наше сообщение (старый сценарий с prompt_wait)
+    if birthday_id is None and update.message.reply_to_message:
+        reply_to = update.message.reply_to_message
+        if reply_to.from_user and reply_to.from_user.id == context.bot.id:
+            key = (chat_id, reply_to.message_id)
+            prompt_wait = bot_data.get("prompt_wait") or {}
+            if key in prompt_wait:
+                birthday_id, uid = prompt_wait.pop(key)
+                if uid == user_id:
+                    source = "reply"
+
+    if not source or birthday_id is None:
         return
+
     record = database.get_birthday_by_id(birthday_id, user_id)
     if not record:
         update.message.reply_text("Запись не найдена.")
@@ -1384,7 +1568,7 @@ def inline_query(update: Update, context: CallbackContext) -> None:
     # Фильтруем и ищем контакты с username
     results = []
     
-    for birthday_id, full_name, birth_date, telegram_username, event_type, event_name in birthdays:
+    for birthday_id, full_name, birth_date, telegram_username, event_type, event_name, _ in birthdays:
         # Пропускаем записи без username
         if not telegram_username:
             continue
@@ -1471,8 +1655,13 @@ def setup_commands(bot):
         BotCommand("check", "Проверить уведомления вручную"),
         BotCommand("cancel", "Отменить текущую операцию"),
     ]
-    bot.set_my_commands(commands)
-    logger.info("Меню команд установлено")
+    try:
+        bot.set_my_commands(commands)
+        logger.info("Меню команд установлено")
+    except Unauthorized:
+        raise ValueError(
+            "Токен бота неверный или отозван. Проверьте BOT_TOKEN в apibot.env и при необходимости получите новый в @BotFather (Telegram)."
+        )
 
 
 def main() -> None:
@@ -1498,6 +1687,11 @@ def main() -> None:
     try:
         bot.delete_webhook()
         logger.info("Webhook снят, используется long polling")
+    except Unauthorized:
+        logger.critical("BOT_TOKEN отклонён Telegram (Unauthorized). Проверьте apibot.env и @BotFather.")
+        raise ValueError(
+            "Токен бота неверный или отозван. Проверьте BOT_TOKEN в apibot.env, получите новый токен в @BotFather (Telegram)."
+        )
     except Exception as e:
         logger.warning("Не удалось снять webhook: %s", e)
     
@@ -1523,7 +1717,7 @@ def main() -> None:
     # Генерация поздравлений: кнопки под уведомлением и команда /prompt
     dispatcher.add_handler(CallbackQueryHandler(congratulate_callback, pattern=r'^congratulate'))
     dispatcher.add_handler(CommandHandler('prompt', prompt_command))
-    dispatcher.add_handler(MessageHandler(Filters.reply & Filters.text, prompt_reply_handler))
+    dispatcher.add_handler(MessageHandler(PromptWaitFilter(dispatcher), prompt_reply_handler))
     
     # ConversationHandler для /add
     add_handler = ConversationHandler(
@@ -1532,10 +1726,14 @@ def main() -> None:
             CallbackQueryHandler(menu_add_entry, pattern=r'^menu:add$'),
         ],
         states={
-            WAITING_EVENT_TYPE: [MessageHandler(Filters.text & ~Filters.command, add_event_type)],
+            WAITING_EVENT_TYPE: [
+                MessageHandler(Filters.text & ~Filters.command, add_event_type),
+                CallbackQueryHandler(add_event_type_callback, pattern=r'^add_type:'),
+            ],
             WAITING_EVENT_NAME: [MessageHandler(Filters.text & ~Filters.command, add_event_name)],
             WAITING_NAME: [MessageHandler(Filters.text & ~Filters.command, add_name)],
             WAITING_DATE: [MessageHandler(Filters.text & ~Filters.command, add_date)],
+            WAITING_REMIND_DAYS: [MessageHandler(Filters.text & ~Filters.command, add_remind_days)],
             WAITING_USERNAME: [MessageHandler((Filters.text | Filters.contact) & ~Filters.command, add_username)],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
@@ -1565,6 +1763,7 @@ def main() -> None:
             WAITING_EDIT_ID: [MessageHandler(Filters.text & ~Filters.command, edit_id)],
             WAITING_EDIT_NAME: [MessageHandler(Filters.text & ~Filters.command, edit_name)],
             WAITING_EDIT_DATE: [MessageHandler(Filters.text & ~Filters.command, edit_date)],
+            WAITING_EDIT_REMIND_DAYS: [MessageHandler(Filters.text & ~Filters.command, edit_remind_days)],
             WAITING_EDIT_USERNAME: [MessageHandler((Filters.text | Filters.contact) & ~Filters.command, edit_username)],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
