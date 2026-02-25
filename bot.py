@@ -1,4 +1,14 @@
 import os
+import sys
+import subprocess
+
+# В некоторых Docker-образах (slim и др.) нет pkg_resources — ставим при старте до импорта telegram/apscheduler
+try:
+    import pkg_resources  # noqa: F401
+except ModuleNotFoundError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "setuptools"])
+    import pkg_resources  # noqa: F401
+
 import logging
 import re
 from datetime import datetime, date
