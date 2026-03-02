@@ -70,7 +70,7 @@ python bot.py
    - `BOT_TOKEN` — токен от @BotFather
    - `WEBHOOK_URL` — **ровно** ваш публичный URL, например: `https://birthdaybot.sarafannikov.work` (без слэша в конце)
    - `PORT` — обычно CapRover подставляет сам (80); если нет — укажите `80` (как в HTTP Settings → Container HTTP Port)
-   - Для работы **генерации поздравлений**: `OPENAI_API_KEY` — ключ с [platform.openai.com](https://platform.openai.com/api-keys); опционально `OPENAI_MODEL` (по умолчанию `gpt-4o-mini`)
+   - Для работы **генерации поздравлений**: `OPENAI_API_KEY` — ключ с [platform.openai.com](https://platform.openai.com/api-keys); опционально `OPENAI_MODEL` (по умолчанию `gpt-4o-mini`). Если сервер в регионе, где OpenAI недоступен (403), задайте `OPENAI_HTTPS_PROXY` — URL прокси с выходом в EU/US (например `http://user:pass@host:port`).
 
 2. После сохранения конфига **сделайте перезапуск приложения** (Deployment → Restart).
 
@@ -159,6 +159,7 @@ python bot.py
 
 Если задан **OPENAI_API_KEY** (в файле `openai.env` или в переменных окружения):
 - **OPENAI_MODEL** (опционально) — модель для генерации. По умолчанию `gpt-4o-mini`. В `openai.env` можно указать, например: `OPENAI_MODEL=gpt-4o` или `OPENAI_MODEL=gpt-4o-mini`.
+- **OPENAI_HTTPS_PROXY** (опционально) — если хостинг в регионе, где OpenAI возвращает 403 (страна/регион не поддерживается), укажите URL HTTPS- или SOCKS-прокси с выходом в EU/US. Только запросы к OpenAI пойдут через прокси. Пример: `http://user:password@proxy.example.com:8080` или в `openai.env`: `OPENAI_HTTPS_PROXY=http://...`.
 - В уведомлении «сегодня день рождения» отображаются кнопки:
   - **Сгенерировать поздравление** — бот пришлёт короткое поздравление, сгенерированное по имени именинника.
   - **Свой промпт** — бот подскажет, как отправить команду `/prompt <id> ваш промпт` для генерации поздравления в нужном стиле (например: «короткое и с юмором», «в стиле Шекспира»).
