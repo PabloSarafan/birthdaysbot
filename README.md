@@ -70,6 +70,7 @@ python bot.py
    - `BOT_TOKEN` — токен от @BotFather
    - `WEBHOOK_URL` — **ровно** ваш публичный URL, например: `https://birthdaybot.sarafannikov.work` (без слэша в конце)
    - `PORT` — обычно CapRover подставляет сам (80); если нет — укажите `80` (как в HTTP Settings → Container HTTP Port)
+   - Для работы **генерации поздравлений**: `OPENAI_API_KEY` — ключ с [platform.openai.com](https://platform.openai.com/api-keys); опционально `OPENAI_MODEL` (по умолчанию `gpt-4o-mini`)
 
 2. После сохранения конфига **сделайте перезапуск приложения** (Deployment → Restart).
 
