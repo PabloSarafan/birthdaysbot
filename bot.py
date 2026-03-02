@@ -1294,7 +1294,7 @@ def generate_congratulation(full_name: str, custom_prompt: Optional[str] = None)
     """
     client = _openai_client()
     if not client:
-        return "Сервис генерации недоступен. Добавьте OPENAI_API_KEY в настройки бота."
+        return "Сервис генерации недоступен. Задайте OPENAI_API_KEY в openai.env (локально) или в переменных окружения (на сервере)."
     
     system = (
         "Ты помогаешь писать короткие тёплые поздравления с днём рождения. "
