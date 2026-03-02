@@ -28,9 +28,11 @@ from scheduler import years_word
 # OpenAI для генерации поздравлений (опционально)
 try:
     import openai
+    import httpx
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
+    httpx = None
 
 # Загружаем переменные окружения: общий .env и отдельные файлы для секретов
 # Путь к папке с ботом — чтобы openai.env находился при любом текущем каталоге
@@ -1267,7 +1269,7 @@ def menu_callback(update: Update, context: CallbackContext) -> None:
 # --- Генерация поздравлений через OpenAI ---
 
 def _openai_client():
-    """Создать клиент OpenAI если есть ключ."""
+    """Создать клиент OpenAI если есть ключ. Для запросов из неподдерживаемых регионов задайте OPENAI_HTTPS_PROXY."""
     if not OPENAI_AVAILABLE:
         return None
     key = (os.getenv('OPENAI_API_KEY') or '').strip()
@@ -1278,6 +1280,14 @@ def _openai_client():
         logger.warning("OpenAI: ключ похож на плейсхолдер или слишком короткий (длина %s)", len(key))
         return None
     logger.info("OpenAI: ключ загружен, длина %s символов", len(key))
+    proxy_url = (os.getenv("OPENAI_HTTPS_PROXY") or os.getenv("OPENAI_PROXY") or "").strip()
+    if proxy_url and httpx is not None:
+        try:
+            http_client = httpx.Client(proxy=proxy_url, timeout=60.0)
+            logger.info("OpenAI: запросы идут через прокси")
+            return openai.OpenAI(api_key=key, http_client=http_client)
+        except Exception as e:
+            logger.warning("OpenAI: не удалось создать клиент с прокси %s: %s", proxy_url[:50], e)
     return openai.OpenAI(api_key=key)
 
 
