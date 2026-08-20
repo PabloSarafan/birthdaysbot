@@ -63,12 +63,16 @@ def _telegram_proxy_url() -> Optional[str]:
     URL прокси для запросов к api.telegram.org.
     Нужен, если с хоста (CapRover и т.п.) Telegram недоступен напрямую
     (Errno 101 Network is unreachable / блокировки).
+
+    Порядок: TELEGRAM_* → HTTPS_PROXY → OPENAI_HTTPS_PROXY (часто уже задан на том же хосте).
     """
     return (
         os.getenv("TELEGRAM_PROXY")
         or os.getenv("TELEGRAM_HTTPS_PROXY")
         or os.getenv("HTTPS_PROXY")
         or os.getenv("https_proxy")
+        or os.getenv("OPENAI_HTTPS_PROXY")
+        or os.getenv("OPENAI_PROXY")
         or ""
     ).strip() or None
 
