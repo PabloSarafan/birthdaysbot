@@ -20,6 +20,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 from telegram.ext.filters import MessageFilter
+from telegram.utils.request import Request
 from dotenv import load_dotenv
 import database
 import scheduler
@@ -47,6 +48,59 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Прочитать bool из переменной окружения (1/true/yes/on)."""
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def _telegram_proxy_url() -> Optional[str]:
+    """
+    URL прокси для запросов к api.telegram.org.
+    Нужен, если с хоста (CapRover и т.п.) Telegram недоступен напрямую
+    (Errno 101 Network is unreachable / блокировки).
+    """
+    return (
+        os.getenv("TELEGRAM_PROXY")
+        or os.getenv("TELEGRAM_HTTPS_PROXY")
+        or os.getenv("HTTPS_PROXY")
+        or os.getenv("https_proxy")
+        or ""
+    ).strip() or None
+
+
+def _maybe_force_ipv4() -> None:
+    """
+    Резолвить хосты только в IPv4.
+    На части VPS/Docker нет маршрута IPv6 → Errno 101 Network is unreachable к api.telegram.org.
+    По умолчанию включено; отключить: TELEGRAM_FORCE_IPV4=0
+    """
+    if not _env_flag("TELEGRAM_FORCE_IPV4", default=True):
+        return
+    import socket
+
+    _orig_getaddrinfo = socket.getaddrinfo
+
+    def getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = getaddrinfo_ipv4  # type: ignore[assignment]
+    logger.info("Включён режим только IPv4 (TELEGRAM_FORCE_IPV4)")
+
+
+def _build_telegram_request() -> Request:
+    """Request для python-telegram-bot с опциональным прокси."""
+    proxy_url = _telegram_proxy_url()
+    if proxy_url:
+        # Не логируем credentials целиком
+        safe = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
+        logger.info("Telegram API через прокси: %s", safe)
+        return Request(con_pool_size=8, connect_timeout=20.0, read_timeout=20.0, proxy_url=proxy_url)
+    return Request(con_pool_size=8, connect_timeout=20.0, read_timeout=20.0)
 
 # Состояния для ConversationHandler
 WAITING_NAME, WAITING_EVENT_TYPE, WAITING_EVENT_NAME, WAITING_DATE, WAITING_REMIND_DAYS, WAITING_USERNAME = range(6)
@@ -1683,14 +1737,18 @@ def main() -> None:
     if not bot_token:
         logger.error("BOT_TOKEN не найден в переменных окружения!")
         raise ValueError("BOT_TOKEN must be set in environment variables")
+
+    # Сначала сеть: IPv4 / прокси — иначе все вызовы к api.telegram.org падают с Network is unreachable
+    _maybe_force_ipv4()
     
     logger.info("Инициализация базы данных...")
     database.init_db()
     
     logger.info("Запуск бота...")
     
-    # Создаём updater и dispatcher
-    updater = Updater(token=bot_token, use_context=True)
+    # Создаём updater и dispatcher (прокси для исходящих к Telegram API)
+    request = _build_telegram_request()
+    updater = Updater(token=bot_token, use_context=True, request=request)
     dispatcher = updater.dispatcher
     bot = updater.bot
 
