@@ -100,11 +100,37 @@ def _build_telegram_request() -> Request:
     """Request для python-telegram-bot с опциональным прокси."""
     proxy_url = _telegram_proxy_url()
     if proxy_url:
+        # http://host:port/ → http://host:port (лишний слэш ломает часть клиентов)
+        proxy_url = proxy_url.rstrip("/")
         # Не логируем credentials целиком
         safe = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
         logger.info("Telegram API через прокси: %s", safe)
         return Request(con_pool_size=8, connect_timeout=20.0, read_timeout=20.0, proxy_url=proxy_url)
     return Request(con_pool_size=8, connect_timeout=20.0, read_timeout=20.0)
+
+
+def _start_caprover_health_server(port: int) -> None:
+    """Минимальный HTTP на PORT, чтобы CapRover nginx не отдавал 502 при long polling."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def do_HEAD(self):
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, fmt, *args):  # noqa: A003
+            return
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    threading.Thread(target=server.serve_forever, name="caprover-health", daemon=True).start()
+    logger.info("HTTP health-check слушает 0.0.0.0:%s (CapRover)", port)
 
 # Состояния для ConversationHandler
 WAITING_NAME, WAITING_EVENT_TYPE, WAITING_EVENT_NAME, WAITING_DATE, WAITING_REMIND_DAYS, WAITING_USERNAME = range(6)
@@ -1756,24 +1782,36 @@ def main() -> None:
     updater = Updater(bot=bot, use_context=True)
     dispatcher = updater.dispatcher
 
-    # Режим продакшена: webhook (если заданы WEBHOOK_URL и PORT), иначе — long polling
+    # Режим обновлений:
+    # По умолчанию на CapRover — long polling (+ health на PORT).
+    # Webhook с Telegram до VPS часто даёт Connection timed out (см. getWebhookInfo),
+    # тогда бот «живой», но не получает /start. Включить webhook только явно: USE_WEBHOOK=1.
     webhook_url = os.getenv("WEBHOOK_URL", "").strip()
     port_str = os.getenv("PORT", "").strip()
-    use_webhook = bool(webhook_url and port_str)
-    if use_webhook:
+    port = None
+    if port_str:
         try:
             port = int(port_str)
         except ValueError:
-            logger.warning("PORT должен быть числом, используем long polling")
-            use_webhook = False
-    if port_str and not webhook_url:
-        logger.warning(
-            "PORT задан, но WEBHOOK_URL не задан — бот будет в режиме polling. "
-            "Чтобы бот отвечал на проде (CapRover и др.), задайте WEBHOOK_URL=https://ваш-домен (например https://birthdaybot.sarafannikov.work)"
+            logger.warning("PORT должен быть числом, игнорируем")
+            port = None
+
+    use_webhook = bool(webhook_url and port is not None and _env_flag("USE_WEBHOOK", default=False))
+    if webhook_url and port is not None and not use_webhook:
+        logger.info(
+            "WEBHOOK_URL задан, но USE_WEBHOOK не включён — используем long polling "
+            "(Telegram не всегда может открыть webhook на VPS). Для webhook: USE_WEBHOOK=1"
         )
+    if port_str and not webhook_url and not use_webhook:
+        logger.info("PORT=%s: health-check + long polling", port_str)
+
     if not use_webhook:
         try:
-            bot.delete_webhook()
+            # drop_pending_updates есть в новых 13.x; на старых просто delete_webhook()
+            try:
+                bot.delete_webhook(drop_pending_updates=False)
+            except TypeError:
+                bot.delete_webhook()
             logger.info("Webhook снят, используется long polling")
         except Unauthorized:
             logger.critical("BOT_TOKEN отклонён Telegram (Unauthorized). Проверьте apibot.env и @BotFather.")
@@ -1884,7 +1922,7 @@ def main() -> None:
 
     dispatcher.add_error_handler(on_error)
 
-    # Запускаем бота: webhook на проде или polling локально
+    # Запускаем бота: webhook только при USE_WEBHOOK=1, иначе long polling (+ health для CapRover)
     if use_webhook:
         path = urlparse(webhook_url).path.strip("/") or ""
         logger.info("Запуск в режиме webhook: %s (порт %s, path %r)", webhook_url, port, path or "/")
@@ -1895,6 +1933,8 @@ def main() -> None:
             webhook_url=webhook_url,
         )
     else:
+        if port is not None:
+            _start_caprover_health_server(port)
         logger.info("Бот запущен и готов к работе (long polling)")
         updater.start_polling()
     updater.idle()
