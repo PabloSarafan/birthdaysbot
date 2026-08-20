@@ -5,7 +5,7 @@ from datetime import datetime, date
 from typing import Optional
 from urllib.parse import urlparse
 from uuid import uuid4
-from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Bot, Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import InlineQueryResultArticle, InputTextMessageContent
 from telegram.error import Conflict, Unauthorized
@@ -1746,11 +1746,11 @@ def main() -> None:
     
     logger.info("Запуск бота...")
     
-    # Создаём updater и dispatcher (прокси для исходящих к Telegram API)
+    # PTB 13: Request передаётся в Bot, не в Updater
     request = _build_telegram_request()
-    updater = Updater(token=bot_token, use_context=True, request=request)
+    bot = Bot(token=bot_token, request=request)
+    updater = Updater(bot=bot, use_context=True)
     dispatcher = updater.dispatcher
-    bot = updater.bot
 
     # Режим продакшена: webhook (если заданы WEBHOOK_URL и PORT), иначе — long polling
     webhook_url = os.getenv("WEBHOOK_URL", "").strip()
