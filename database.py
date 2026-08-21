@@ -36,6 +36,7 @@ def init_db():
         migrate_add_username()
         migrate_add_event_fields()
         migrate_add_remind_days()
+        ensure_llm_usage_table()
         
     except Exception as e:
         logger.error(f"Ошибка при инициализации базы данных: {e}")
@@ -116,6 +117,123 @@ def migrate_add_remind_days():
 
 
 DEFAULT_REMIND_DAYS = '0,1,3,7'
+
+
+def ensure_llm_usage_table() -> None:
+    """Таблица учёта генераций OpenAI на пользователя (lifetime)."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS llm_usage (
+                user_id INTEGER PRIMARY KEY,
+                used_count INTEGER NOT NULL DEFAULT 0,
+                last_used_at REAL NOT NULL DEFAULT 0
+            )
+            '''
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка при создании llm_usage: {e}")
+        raise
+
+
+def try_consume_llm_generation(
+    user_id: int,
+    total_limit: int,
+    cooldown_sec: float,
+) -> Tuple[bool, str, int]:
+    """
+    Атомарно проверить лимит/cooldown и зарезервировать одну генерацию.
+
+    Returns:
+        (ok, error_or_empty, remaining_after) — remaining_after только при ok.
+    """
+    import time
+
+    if total_limit <= 0:
+        return False, "Генерация поздравлений отключена.", 0
+
+    now = time.time()
+    try:
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT used_count, last_used_at FROM llm_usage WHERE user_id = ?",
+                (user_id,),
+            )
+            row = cursor.fetchone()
+            used = int(row[0]) if row else 0
+            last_at = float(row[1]) if row else 0.0
+
+            if used >= total_limit:
+                conn.rollback()
+                return (
+                    False,
+                    f"Лимит генераций исчерпан ({total_limit} на аккаунт). "
+                    f"Использовано: {used}/{total_limit}.",
+                    0,
+                )
+
+            elapsed = now - last_at
+            if last_at > 0 and elapsed < cooldown_sec:
+                wait = max(1, int(cooldown_sec - elapsed + 0.999))
+                conn.rollback()
+                return (
+                    False,
+                    f"Подождите {wait} сек. перед следующей генерацией "
+                    f"(осталось {total_limit - used} из {total_limit}).",
+                    total_limit - used,
+                )
+
+            new_used = used + 1
+            if row:
+                cursor.execute(
+                    "UPDATE llm_usage SET used_count = ?, last_used_at = ? WHERE user_id = ?",
+                    (new_used, now, user_id),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO llm_usage (user_id, used_count, last_used_at) VALUES (?, ?, ?)",
+                    (user_id, new_used, now),
+                )
+            conn.commit()
+            remaining = total_limit - new_used
+            return True, "", remaining
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка llm_usage для user_id={user_id}: {e}")
+        return False, "Не удалось проверить лимит генераций. Попробуйте позже.", 0
+
+
+def refund_llm_generation(user_id: int) -> None:
+    """Вернуть одну генерацию (если API не вызывался / явный сбой до запроса)."""
+    try:
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE llm_usage SET used_count = CASE WHEN used_count > 0 THEN used_count - 1 ELSE 0 END "
+                "WHERE user_id = ?",
+                (user_id,),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка refund llm_usage для user_id={user_id}: {e}")
 
 
 def add_birthday(user_id: int, full_name: str, birth_date: str, telegram_username: Optional[str] = None,
@@ -250,19 +368,34 @@ def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: 
         return False
 
 
-def get_all_birthdays_for_notifications() -> List[Tuple[int, int, str, str, Optional[str], str, Optional[str], str]]:
+def get_all_birthdays_for_notifications(
+    user_id: Optional[int] = None,
+) -> List[Tuple[int, int, str, str, Optional[str], str, Optional[str], str]]:
     """
-    Получить все дни рождения для отправки уведомлений.
-    
+    Получить дни рождения для отправки уведомлений.
+
+    Args:
+        user_id: если задан — только записи этого пользователя (для /check);
+                 если None — все записи (ежедневный cron).
+
     Returns:
         Список кортежей (id, user_id, full_name, birth_date, telegram_username, event_type, event_name, remind_days)
     """
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        
-        cursor.execute('SELECT id, user_id, full_name, birth_date, telegram_username, event_type, event_name, COALESCE(remind_days, ?) FROM birthdays', (DEFAULT_REMIND_DAYS,))
-        
+        if user_id is not None:
+            cursor.execute(
+                'SELECT id, user_id, full_name, birth_date, telegram_username, event_type, event_name, COALESCE(remind_days, ?) '
+                'FROM birthdays WHERE user_id = ?',
+                (DEFAULT_REMIND_DAYS, user_id),
+            )
+        else:
+            cursor.execute(
+                'SELECT id, user_id, full_name, birth_date, telegram_username, event_type, event_name, COALESCE(remind_days, ?) '
+                'FROM birthdays',
+                (DEFAULT_REMIND_DAYS,),
+            )
         results = cursor.fetchall()
         conn.close()
         return results

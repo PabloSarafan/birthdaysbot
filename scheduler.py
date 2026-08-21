@@ -83,28 +83,28 @@ def calculate_age(birth_date_str: str) -> int:
         return -1
 
 
-def check_and_send_notifications(bot):
+def check_and_send_notifications(bot, user_id: int = None):
     """
-    Проверить все дни рождения и отправить уведомления.
-    
-    Отправляет уведомления за 7, 3 и 1 день до дня рождения.
-    
+    Проверить дни рождения и отправить уведомления.
+
     Args:
         bot: Экземпляр бота для отправки сообщений
+        user_id: если задан — только события этого пользователя (/check);
+                 если None — все пользователи (cron в 09:00).
     """
-    logger.info("Запуск проверки дней рождения...")
+    scope = f"user_id={user_id}" if user_id is not None else "all users"
+    logger.info("Запуск проверки дней рождения (%s)...", scope)
     
     try:
-        # Получаем все дни рождения из базы данных
-        birthdays = database.get_all_birthdays_for_notifications()
+        birthdays = database.get_all_birthdays_for_notifications(user_id=user_id)
         
         if not birthdays:
-            logger.info("Нет дней рождения в базе данных")
-            return
+            logger.info("Нет дней рождения в базе данных (%s)", scope)
+            return 0
         
         notifications_sent = 0
         
-        for birthday_id, user_id, full_name, birth_date, telegram_username, event_type, event_name, remind_days_str in birthdays:
+        for birthday_id, owner_id, full_name, birth_date, telegram_username, event_type, event_name, remind_days_str in birthdays:
             days_until = calculate_days_until_birthday(birth_date)
             # Парсим дни напоминаний для этого события (например "0,1,3,7" -> {0,1,3,7})
             try:
@@ -158,9 +158,9 @@ def check_and_send_notifications(bot):
                         elif days_until == 3:
                             age_will_be = f" (исполнится {age_turning} {years_word(age_turning)})" if current_age >= 0 else ""
                             message = f"🎂 Не забудь поздравить {name_with_username} через 3 дня ({formatted_date}){age_will_be}!"
-                        else:  # 7 дней
+                        else:
                             age_will_be = f" (исполнится {age_turning} {years_word(age_turning)})" if current_age >= 0 else ""
-                            message = f"🎂 Не забудь поздравить {name_with_username} через 7 дней ({formatted_date}){age_will_be}!"
+                            message = f"🎂 Не забудь поздравить {name_with_username} через {days_until} дн. ({formatted_date}){age_will_be}!"
                     
                     elif event_type == 'holiday':
                         # Для праздников используем название события
@@ -171,8 +171,8 @@ def check_and_send_notifications(bot):
                             message = f"🎊 Завтра {holiday_name} ({formatted_date})!\nНе забудь поздравить!"
                         elif days_until == 3:
                             message = f"🎊 Через 3 дня {holiday_name} ({formatted_date})!\nНе забудь поздравить!"
-                        else:  # 7 дней
-                            message = f"🎊 Через 7 дней {holiday_name} ({formatted_date})!"
+                        else:
+                            message = f"🎊 Через {days_until} дн. {holiday_name} ({formatted_date})!"
                     
                     else:  # 'other'
                         # Для других событий
@@ -183,21 +183,26 @@ def check_and_send_notifications(bot):
                             message = f"📅 Завтра не забудь про {event_title} ({formatted_date})!"
                         elif days_until == 3:
                             message = f"📅 Через 3 дня не забудь про {event_title} ({formatted_date})!"
-                        else:  # 7 дней
-                            message = f"📅 Через 7 дней: {event_title} ({formatted_date})"
+                        else:
+                            message = f"📅 Через {days_until} дн.: {event_title} ({formatted_date})"
                     
-                    # Отправляем уведомление (с кнопками для дня рождения сегодня)
-                    bot.send_message(chat_id=user_id, text=message, reply_markup=reply_markup)
+                    # Отправляем только владельцу записи
+                    bot.send_message(chat_id=owner_id, text=message, reply_markup=reply_markup)
                     notifications_sent += 1
-                    logger.info(f"Отправлено уведомление пользователю {user_id}: {full_name} [{event_type}] через {days_until} дней")
+                    logger.info(
+                        f"Отправлено уведомление пользователю {owner_id}: "
+                        f"{full_name} [{event_type}] через {days_until} дней"
+                    )
                     
                 except Exception as e:
-                    logger.error(f"Ошибка при отправке уведомления пользователю {user_id}: {e}")
+                    logger.error(f"Ошибка при отправке уведомления пользователю {owner_id}: {e}")
         
-        logger.info(f"Проверка завершена. Отправлено уведомлений: {notifications_sent}")
+        logger.info(f"Проверка завершена ({scope}). Отправлено уведомлений: {notifications_sent}")
+        return notifications_sent
     
     except Exception as e:
         logger.error(f"Ошибка при проверке дней рождения: {e}")
+        return 0
 
 
 def start_scheduler(bot):

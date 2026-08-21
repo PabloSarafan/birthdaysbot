@@ -2,7 +2,7 @@ import os
 import logging
 import re
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import urlparse
 from uuid import uuid4
 from telegram import Bot, Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -1487,21 +1487,25 @@ def import_confirm(update: Update, context: CallbackContext) -> int:
 
 
 def check_notifications(update: Update, context: CallbackContext) -> None:
-    """Ручная проверка и отправка уведомлений (для тестирования)."""
+    """Ручная проверка уведомлений только для текущего пользователя."""
     user = update.effective_user
     logger.info(f"Пользователь {user.id} запустил ручную проверку уведомлений")
     chat_id = update.effective_chat.id
     bot = context.bot
     if update.message:
-        update.message.reply_text("🔍 Проверяю уведомления...")
+        update.message.reply_text("🔍 Проверяю ваши уведомления...")
     else:
         update.callback_query.answer()
-        bot.send_message(chat_id=chat_id, text="🔍 Проверяю уведомления...")
-    scheduler.check_and_send_notifications(bot)
-    if update.message:
-        update.message.reply_text("✅ Проверка завершена! Уведомления отправлены если есть подходящие даты.")
+        bot.send_message(chat_id=chat_id, text="🔍 Проверяю ваши уведомления...")
+    sent = scheduler.check_and_send_notifications(bot, user_id=user.id)
+    if sent:
+        done = f"✅ Готово: отправлено уведомлений по вашим событиям: {sent}."
     else:
-        bot.send_message(chat_id=chat_id, text="✅ Проверка завершена! Уведомления отправлены если есть подходящие даты.")
+        done = "✅ Готово: сейчас нет напоминаний по вашим событиям."
+    if update.message:
+        update.message.reply_text(done)
+    else:
+        bot.send_message(chat_id=chat_id, text=done)
 
 
 def menu_callback(update: Update, context: CallbackContext) -> None:
@@ -1538,30 +1542,75 @@ def _openai_client():
     return openai.OpenAI(api_key=key)
 
 
-def generate_congratulation(full_name: str, custom_prompt: Optional[str] = None) -> str:
+def _openai_limits() -> Tuple[int, float, int]:
+    """(total_limit, cooldown_sec, prompt_max_len) из env."""
+    try:
+        total = int((os.getenv("OPENAI_USER_TOTAL_LIMIT") or "5").strip())
+    except ValueError:
+        total = 5
+    try:
+        cooldown = float((os.getenv("OPENAI_COOLDOWN_SEC") or "20").strip())
+    except ValueError:
+        cooldown = 20.0
+    try:
+        prompt_max = int((os.getenv("OPENAI_PROMPT_MAX_LEN") or "400").strip())
+    except ValueError:
+        prompt_max = 400
+    return max(0, total), max(0.0, cooldown), max(50, prompt_max)
+
+
+def generate_congratulation(
+    full_name: str,
+    custom_prompt: Optional[str] = None,
+    user_id: Optional[int] = None,
+) -> str:
     """
     Сгенерировать текст поздравления с днём рождения через OpenAI.
-    
+
     Args:
         full_name: Имя именинника
         custom_prompt: Дополнительные пожелания (стиль, тон и т.д.), опционально
-    
+        user_id: Telegram ID — для lifetime-лимита и cooldown
+
     Returns:
         Текст поздравления или сообщение об ошибке
     """
+    total_limit, cooldown_sec, prompt_max_len = _openai_limits()
+    prompt = (custom_prompt or "").strip()
+    if len(prompt) > prompt_max_len:
+        return (
+            f"Промпт слишком длинный (макс. {prompt_max_len} символов). "
+            f"Сейчас: {len(prompt)}. Сократите текст и попробуйте снова."
+        )
+
+    remaining_after: Optional[int] = None
+    reserved = False
+    if user_id is not None:
+        ok, err, remaining_after = database.try_consume_llm_generation(
+            user_id, total_limit, cooldown_sec
+        )
+        if not ok:
+            return err
+        reserved = True
+
     client = _openai_client()
     if not client:
-        return "Сервис генерации недоступен. Задайте OPENAI_API_KEY в openai.env (локально) или в переменных окружения (на сервере)."
-    
+        if reserved and user_id is not None:
+            database.refund_llm_generation(user_id)
+        return (
+            "Сервис генерации недоступен. Задайте OPENAI_API_KEY в openai.env "
+            "(локально) или в переменных окружения (на сервере)."
+        )
+
     system = (
         "Ты помогаешь писать короткие тёплые поздравления с днём рождения. "
         "Пиши от первого лица, как будто пользователь сам поздравляет. "
         "Без обрамления в кавычки и без подписи в конце. Один короткий абзац."
     )
     user_msg = f"Напиши поздравление с днём рождения для {full_name}."
-    if custom_prompt and custom_prompt.strip():
-        user_msg += f" Дополнительные пожелания: {custom_prompt.strip()}"
-    
+    if prompt:
+        user_msg += f" Дополнительные пожелания: {prompt}"
+
     model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
     try:
         response = client.chat.completions.create(
@@ -1573,9 +1622,14 @@ def generate_congratulation(full_name: str, custom_prompt: Optional[str] = None)
             max_tokens=300,
         )
         text = (response.choices[0].message.content or "").strip()
-        return text if text else "Не удалось сгенерировать поздравление."
+        if not text:
+            return "Не удалось сгенерировать поздравление."
+        if remaining_after is not None and remaining_after <= 2:
+            text += f"\n\nℹ️ Осталось генераций: {remaining_after} из {total_limit}."
+        return text
     except Exception as e:
         logger.exception("Ошибка OpenAI при генерации поздравления")
+        # Слот уже потрачен: запрос к API ушёл / попытка была
         err_str = str(e).lower()
         if "401" in err_str or "invalid_api_key" in err_str or "incorrect api key" in err_str:
             return "Проверьте OPENAI_API_KEY в файле openai.env — ключ неверный или не задан."
@@ -1646,7 +1700,7 @@ def congratulate_callback(update: Update, context: CallbackContext) -> None:
             return
         full_name = record[1]
         query.message.reply_text("⏳ Генерирую поздравление...")
-        text = generate_congratulation(full_name, custom_prompt=preset_text)
+        text = generate_congratulation(full_name, custom_prompt=preset_text, user_id=user_id)
         query.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
         return
     
@@ -1686,7 +1740,7 @@ def congratulate_callback(update: Update, context: CallbackContext) -> None:
     full_name = record[1]
     query.message.reply_text("⏳ Генерирую поздравление...")
     
-    text = generate_congratulation(full_name, custom_prompt=None)
+    text = generate_congratulation(full_name, custom_prompt=None, user_id=user_id)
     query.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
 
 
@@ -1755,7 +1809,7 @@ def prompt_reply_handler(update: Update, context: CallbackContext) -> None:
         return
     full_name = record[1]
     update.message.reply_text("⏳ Генерирую поздравление по вашему промпту...")
-    text = generate_congratulation(full_name, custom_prompt=prompt_text)
+    text = generate_congratulation(full_name, custom_prompt=prompt_text, user_id=user_id)
     update.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
 
 
@@ -1790,7 +1844,7 @@ def prompt_command(update: Update, context: CallbackContext) -> None:
     full_name = record[1]
     update.message.reply_text("⏳ Генерирую поздравление по вашему промпту...")
     
-    text = generate_congratulation(full_name, custom_prompt=custom_prompt)
+    text = generate_congratulation(full_name, custom_prompt=custom_prompt, user_id=user_id)
     update.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
 
 
