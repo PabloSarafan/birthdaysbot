@@ -190,8 +190,11 @@ def check_and_send_notifications(bot, user_id: int = None):
                     bot.send_message(chat_id=owner_id, text=message, reply_markup=reply_markup)
                     notifications_sent += 1
                     logger.info(
-                        f"Отправлено уведомление пользователю {owner_id}: "
-                        f"{full_name} [{event_type}] через {days_until} дней"
+                        "Уведомление user_id=%s birthday_id=%s type=%s days_until=%s",
+                        owner_id,
+                        birthday_id,
+                        event_type,
+                        days_until,
                     )
                     
                 except Exception as e:

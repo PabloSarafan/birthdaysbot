@@ -266,9 +266,11 @@ def add_birthday(user_id: int, full_name: str, birth_date: str, telegram_usernam
         
         conn.commit()
         conn.close()
-        username_info = f" (@{telegram_username})" if telegram_username else ""
-        event_info = f" [{event_type}]" if event_type != 'birthday' else ""
-        logger.info(f"Добавлен день рождения: {full_name}{username_info} ({birth_date}){event_info} для пользователя {user_id}")
+        logger.info(
+            "Добавлена запись id для user_id=%s type=%s",
+            user_id,
+            event_type,
+        )
         return True
     except Exception as e:
         logger.error(f"Ошибка при добавлении дня рождения: {e}")
@@ -324,11 +326,45 @@ def delete_birthday(birthday_id: int, user_id: int) -> bool:
         conn.close()
         
         if deleted:
-            logger.info(f"Удален день рождения с ID {birthday_id} для пользователя {user_id}")
+            logger.info("Удалена запись id=%s user_id=%s", birthday_id, user_id)
         return deleted
     except Exception as e:
         logger.error(f"Ошибка при удалении дня рождения: {e}")
         return False
+
+
+def delete_all_user_data(user_id: int) -> Tuple[int, bool]:
+    """
+    Удалить все персональные данные пользователя (события + llm_usage).
+
+    Returns:
+        (число удалённых записей birthdays, удалён ли llm_usage)
+    """
+    try:
+        conn = sqlite3.connect(DB_NAME, timeout=10)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM birthdays WHERE user_id = ?", (user_id,))
+            deleted_events = cursor.rowcount
+            cursor.execute("DELETE FROM llm_usage WHERE user_id = ?", (user_id,))
+            deleted_llm = cursor.rowcount > 0
+            conn.commit()
+            logger.info(
+                "Удалены все данные user_id=%s events=%s llm=%s",
+                user_id,
+                deleted_events,
+                deleted_llm,
+            )
+            return deleted_events, deleted_llm
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка при полном удалении данных user_id={user_id}: {e}")
+        return 0, False
 
 
 def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: str, telegram_username: Optional[str] = None,
@@ -361,7 +397,7 @@ def update_birthday(birthday_id: int, user_id: int, full_name: str, birth_date: 
         conn.close()
         
         if updated:
-            logger.info(f"Обновлен день рождения с ID {birthday_id} для пользователя {user_id}")
+            logger.info("Обновлена запись id=%s user_id=%s", birthday_id, user_id)
         return updated
     except Exception as e:
         logger.error(f"Ошибка при обновлении дня рождения: {e}")

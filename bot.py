@@ -258,6 +258,9 @@ def start(update: Update, context: CallbackContext) -> None:
 /delete - Удалить запись
 /edit - Редактировать запись
 /check - Проверить уведомления вручную
+/export - Выгрузить мои данные
+/privacy - Политика конфиденциальности
+/delete_me - Удалить все мои данные
 /cancel - Отменить текущую операцию
 
 🎉 Что я умею:
@@ -274,7 +277,7 @@ def start(update: Update, context: CallbackContext) -> None:
 Начнем? Используйте кнопки ниже или команды.
 """
     update.message.reply_text(welcome_message, reply_markup=_menu_keyboard())
-    logger.info(f"Пользователь {user.id} ({user.username}) запустил бота")
+    logger.info("Пользователь user_id=%s запустил бота", user.id)
 
 
 def parse_bulk_import(text: str):
@@ -358,7 +361,7 @@ def parse_bulk_import(text: str):
                         datetime.strptime(normalized_date, '%Y-%m-%d')
                     
                     parsed_events.append((full_name, normalized_date, username, event_type, event_name))
-                    logger.info(f"Распарсено: {full_name}, {normalized_date}, @{username}, {event_type}")
+                    logger.info("Импорт: распарсена запись type=%s", event_type)
                     
                 except ValueError as e:
                     error_msg = f"Неверный формат даты '{date_str}' для записи: {name_part}"
@@ -575,7 +578,7 @@ def add_date(update: Update, context: CallbackContext) -> int:
                     f"📅 {date_str}\n\n"
                     f"Напоминания: за 0, 1, 3 и 7 дней до события (можно изменить в /edit)."
                 )
-                logger.info(f"Пользователь {user_id} добавил событие: {event_name} ({event_type}) - {date_str}")
+                logger.info("Добавлено событие user_id=%s type=%s", user_id, event_type)
             else:
                 update.message.reply_text("❌ Ошибка при сохранении. Попробуйте позже.")
             
@@ -702,14 +705,14 @@ def add_username(update: Update, context: CallbackContext) -> int:
     
     if update.message.contact:
         contact = update.message.contact
-        logger.info(f"Получен контакт: {contact.first_name} {contact.last_name}, user_id: {contact.user_id}")
+        logger.info("Получен контакт contact_user_id=%s", contact.user_id)
         if contact.user_id:
             try:
                 chat = bot.get_chat(contact.user_id)
                 telegram_username = chat.username
-                logger.info(f"Username получен из контакта: @{telegram_username}")
+                logger.info("Username получен из контакта (owner_user_id=%s)", user_id)
             except Exception as e:
-                logger.warning(f"Не удалось получить username из контакта: {e}")
+                logger.warning("Не удалось получить username из контакта owner_user_id=%s: %s", user_id, e)
                 telegram_username = None
     
     elif update.message.text:
@@ -766,7 +769,7 @@ def add_username(update: Update, context: CallbackContext) -> int:
             f"Напоминания: за {remind_days.replace(',', ', ')} дн. до события (0 = в день). Изменить: /edit.",
             reply_markup=ReplyKeyboardRemove()
         )
-        logger.info(f"Пользователь {user_id} добавил: {full_name}{username_text} - {formatted_date}")
+        logger.info("Добавлена запись user_id=%s", user_id)
     else:
         update.message.reply_text(
             "❌ Ошибка при сохранении. Попробуйте позже.",
@@ -927,7 +930,7 @@ def delete_execute(update: Update, context: CallbackContext) -> int:
             
             if database.delete_birthday(birthday_id, user_id):
                 update.message.reply_text(f"✅ Удалено: {display_name}")
-                logger.info(f"Пользователь {user_id} удалил: {display_name} [{event_type}]")
+                logger.info("Удалена запись user_id=%s type=%s", user_id, event_type)
             else:
                 update.message.reply_text("❌ Ошибка при удалении.")
         else:
@@ -1121,7 +1124,7 @@ def edit_date(update: Update, context: CallbackContext) -> int:
                     f"{event_emoji} {new_event_name}\n"
                     f"📅 {date_str}"
                 )
-                logger.info(f"Пользователь {user_id} обновил событие {birthday_id} [{event_type}]")
+                logger.info("Обновлено событие user_id=%s id=%s type=%s", user_id, birthday_id, event_type)
             else:
                 update.message.reply_text("❌ Ошибка при обновлении.")
             
@@ -1186,16 +1189,16 @@ def edit_username(update: Update, context: CallbackContext) -> int:
     # Обработка контакта (когда пользователь выбрал контакт из телефона)
     if update.message.contact:
         contact = update.message.contact
-        logger.info(f"Получен контакт при редактировании: {contact.first_name} {contact.last_name}, user_id: {contact.user_id}")
+        logger.info("Получен контакт при редактировании contact_user_id=%s", contact.user_id)
         
         # Пытаемся получить username через user_id
         if contact.user_id:
             try:
                 chat = bot.get_chat(contact.user_id)
                 telegram_username = chat.username
-                logger.info(f"Username получен из контакта: @{telegram_username}")
+                logger.info("Username получен из контакта при edit (owner_user_id=%s)", user_id)
             except Exception as e:
-                logger.warning(f"Не удалось получить username из контакта: {e}")
+                logger.warning("Не удалось получить username из контакта при edit owner_user_id=%s: %s", user_id, e)
                 telegram_username = None
     
     # Обработка кнопки "Пропустить" (оставляет старый username)
@@ -1315,10 +1318,10 @@ def parse_bulk_import(text: str):
                         event_name = full_name if event_type in ['holiday', 'other'] else None
                         
                         records.append((full_name, db_date, username, event_type, event_name))
-                        logger.info(f"Распарсена запись: {full_name} - {db_date} [{event_type}]")
+                        logger.info("Импорт: запись type=%s", event_type)
                     except Exception as e:
-                        errors.append(f"Ошибка парсинга даты для '{full_name}': {e}")
-                        logger.warning(f"Ошибка парсинга даты: {date_str} - {e}")
+                        errors.append("Ошибка парсинга даты в одной из записей")
+                        logger.warning("Импорт: ошибка парсинга даты: %s", e)
                 else:
                     errors.append(f"Не найдена дата для '{full_name}'")
                 
@@ -1467,7 +1470,7 @@ def import_confirm(update: Update, context: CallbackContext) -> int:
             else:
                 failed_count += 1
         except Exception as e:
-            logger.error(f"Ошибка при импорте записи {full_name}: {e}")
+            logger.error("Ошибка при импорте записи user_id=%s: %s", user_id, e)
             failed_count += 1
     
     # Показываем результат
@@ -1479,17 +1482,112 @@ def import_confirm(update: Update, context: CallbackContext) -> int:
     
     update.message.reply_text(result_message, reply_markup=ReplyKeyboardRemove())
     
-    logger.info(f"Пользователь {user_id} импортировал {success_count} записей")
+    logger.info("Импорт завершён user_id=%s success=%s", user_id, success_count)
     
     # Очищаем данные
     context.user_data.clear()
     return ConversationHandler.END
 
 
+def privacy_command(update: Update, context: CallbackContext) -> None:
+    """Краткая политика конфиденциальности."""
+    contact = (os.getenv("PRIVACY_CONTACT") or "").strip()
+    contact_line = f"\n• Связь по вопросам данных: {contact}" if contact else ""
+    text = (
+        "🔒 Конфиденциальность\n\n"
+        "Что храним:\n"
+        "• ваш Telegram user_id\n"
+        "• имена/названия событий, даты, опционально @username\n"
+        "• настройки напоминаний\n"
+        "• счётчик генераций поздравлений (без текста поздравлений)\n\n"
+        "Зачем:\n"
+        "• напоминания о событиях\n"
+        "• генерация поздравлений (если включён OpenAI)\n\n"
+        "Мы не продаём данные третьим лицам. "
+        "Запросы к OpenAI уходят только когда вы сами запускаете генерацию.\n\n"
+        "Ваши права:\n"
+        "• /export — выгрузить свои данные\n"
+        "• /delete_me — удалить все свои данные из бота"
+        f"{contact_line}"
+    )
+    update.message.reply_text(text)
+
+
+def export_command(update: Update, context: CallbackContext) -> None:
+    """Экспорт всех данных текущего пользователя."""
+    user_id = update.effective_user.id
+    birthdays = database.get_all_birthdays(user_id)
+    lines = [
+        f"Экспорт данных Wishly Buddy",
+        f"user_id: {user_id}",
+        f"записей: {len(birthdays)}",
+        "",
+    ]
+    if not birthdays:
+        lines.append("(записей нет)")
+    else:
+        for idx, (bid, full_name, birth_date, telegram_username, event_type, event_name, remind_days) in enumerate(birthdays, 1):
+            uname = f" @{telegram_username}" if telegram_username else ""
+            title = event_name or full_name
+            lines.append(
+                f"{idx}. id={bid} type={event_type} name={title}{uname} "
+                f"date={birth_date} remind={remind_days}"
+            )
+    # Telegram limit ~4096; режем на куски
+    text = "\n".join(lines)
+    chunk_size = 3500
+    for i in range(0, max(len(text), 1), chunk_size):
+        update.message.reply_text(text[i:i + chunk_size] or "(пусто)")
+    logger.info("Экспорт данных user_id=%s records=%s", user_id, len(birthdays))
+
+
+def delete_me_start(update: Update, context: CallbackContext) -> None:
+    """Запрос подтверждения полного удаления данных."""
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Да, удалить всё", callback_data="delete_me:confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="delete_me:cancel"),
+        ]
+    ])
+    update.message.reply_text(
+        "⚠️ Удалить все ваши данные из бота?\n\n"
+        "Будут удалены все события и счётчик генераций поздравлений. "
+        "Это действие нельзя отменить.",
+        reply_markup=keyboard,
+    )
+
+
+def delete_me_callback(update: Update, context: CallbackContext) -> None:
+    """Подтверждение / отмена /delete_me."""
+    query = update.callback_query
+    query.answer()
+    data = (query.data or "").strip()
+    user_id = update.effective_user.id
+
+    if data == "delete_me:cancel":
+        query.edit_message_text("Удаление отменено. Данные сохранены.")
+        return
+    if data != "delete_me:confirm":
+        return
+
+    # Сбросить ожидание кастомного промпта, если было
+    prompt_wait = context.bot_data.get("prompt_wait_user") or {}
+    if user_id in prompt_wait:
+        prompt_wait.pop(user_id, None)
+
+    deleted_events, _ = database.delete_all_user_data(user_id)
+    context.user_data.clear()
+    query.edit_message_text(
+        f"✅ Готово. Удалено событий: {deleted_events}.\n"
+        "Счётчик генераций сброшен. Можете начать заново через /start."
+    )
+    logger.info("delete_me выполнен user_id=%s events=%s", user_id, deleted_events)
+
+
 def check_notifications(update: Update, context: CallbackContext) -> None:
     """Ручная проверка уведомлений только для текущего пользователя."""
     user = update.effective_user
-    logger.info(f"Пользователь {user.id} запустил ручную проверку уведомлений")
+    logger.info("Ручная проверка уведомлений user_id=%s", user.id)
     chat_id = update.effective_chat.id
     bot = context.bot
     if update.message:
@@ -1538,7 +1636,8 @@ def _openai_client():
             logger.info("OpenAI: запросы идут через прокси")
             return openai.OpenAI(api_key=key, http_client=http_client)
         except Exception as e:
-            logger.warning("OpenAI: не удалось создать клиент с прокси %s: %s", proxy_url[:50], e)
+            safe = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
+            logger.warning("OpenAI: не удалось создать клиент с прокси %s: %s", safe[:80], e)
     return openai.OpenAI(api_key=key)
 
 
@@ -1857,7 +1956,7 @@ def inline_query(update: Update, context: CallbackContext) -> None:
     query = update.inline_query.query.strip().lower()
     user_id = update.inline_query.from_user.id
     
-    logger.info(f"Inline запрос от пользователя {user_id}: '{query}'")
+    logger.info("Inline запрос user_id=%s query_len=%s", user_id, len(query))
     
     # Получаем все записи пользователя
     birthdays = database.get_all_birthdays(user_id)
@@ -1965,6 +2064,9 @@ def setup_commands(bot):
         BotCommand("edit", "Редактировать событие"),
         BotCommand("import", "Массовый импорт событий из списка"),
         BotCommand("check", "Проверить уведомления вручную"),
+        BotCommand("export", "Выгрузить мои данные"),
+        BotCommand("privacy", "Конфиденциальность"),
+        BotCommand("delete_me", "Удалить все мои данные"),
         BotCommand("cancel", "Отменить текущую операцию"),
     ]
     try:
@@ -2053,6 +2155,10 @@ def main() -> None:
     
     # Обработчик команды /check (ручная проверка уведомлений)
     dispatcher.add_handler(CommandHandler('check', check_notifications))
+    dispatcher.add_handler(CommandHandler('privacy', privacy_command))
+    dispatcher.add_handler(CommandHandler('export', export_command))
+    dispatcher.add_handler(CommandHandler('delete_me', delete_me_start))
+    dispatcher.add_handler(CallbackQueryHandler(delete_me_callback, pattern=r'^delete_me:(confirm|cancel)$'))
     
     # Inline-меню: Список и Проверить (Добавить/Удалить/Редактировать — в entry_points диалогов ниже)
     dispatcher.add_handler(CallbackQueryHandler(menu_callback, pattern=r'^menu:(list|check)$'))
