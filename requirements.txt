@@ -3,6 +3,7 @@ python-dotenv~=1.0.0
 pillow>=10.0.0
 urllib3<2.0
 openai>=1.0.0
+httpx>=0.27.0
 # SOCKS5-прокси для TELEGRAM_PROXY / OPENAI_HTTPS_PROXY
 PySocks>=1.7.1
 # pkg_resources нужен для apscheduler (зависимость telegram) в Docker Python 3.12+

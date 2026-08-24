@@ -1628,17 +1628,36 @@ def _openai_client():
     if key.startswith('sk-your-') or len(key) < 40:
         logger.warning("OpenAI: ключ похож на плейсхолдер или слишком короткий (длина %s)", len(key))
         return None
-    logger.info("OpenAI: ключ загружен, длина %s символов", len(key))
     proxy_url = (os.getenv("OPENAI_HTTPS_PROXY") or os.getenv("OPENAI_PROXY") or "").strip()
+    # Жёсткий таймаут: иначе кнопка «висит» без ответа при проблемах с прокси/API
+    try:
+        timeout_sec = float((os.getenv("OPENAI_TIMEOUT_SEC") or "45").strip())
+    except ValueError:
+        timeout_sec = 45.0
+    timeout_sec = max(10.0, min(timeout_sec, 120.0))
+
     if proxy_url and httpx is not None:
         try:
-            http_client = httpx.Client(proxy=proxy_url, timeout=60.0)
-            logger.info("OpenAI: запросы идут через прокси")
-            return openai.OpenAI(api_key=key, http_client=http_client)
+            http_timeout = httpx.Timeout(timeout_sec, connect=min(15.0, timeout_sec))
+            http_client = httpx.Client(proxy=proxy_url, timeout=http_timeout)
+            logger.info("OpenAI: клиент с прокси, timeout=%ss", timeout_sec)
+            return openai.OpenAI(api_key=key, http_client=http_client, timeout=timeout_sec)
+        except TypeError:
+            # Старые версии openai без timeout= в конструкторе
+            try:
+                http_timeout = httpx.Timeout(timeout_sec, connect=min(15.0, timeout_sec))
+                http_client = httpx.Client(proxy=proxy_url, timeout=http_timeout)
+                return openai.OpenAI(api_key=key, http_client=http_client)
+            except Exception as e:
+                safe = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
+                logger.warning("OpenAI: не удалось создать клиент с прокси %s: %s", safe[:80], e)
         except Exception as e:
             safe = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
             logger.warning("OpenAI: не удалось создать клиент с прокси %s: %s", safe[:80], e)
-    return openai.OpenAI(api_key=key)
+    try:
+        return openai.OpenAI(api_key=key, timeout=timeout_sec)
+    except TypeError:
+        return openai.OpenAI(api_key=key)
 
 
 def _openai_limits() -> Tuple[int, float, int]:
@@ -1732,7 +1751,9 @@ def generate_congratulation(
         err_str = str(e).lower()
         if "401" in err_str or "invalid_api_key" in err_str or "incorrect api key" in err_str:
             return "Проверьте OPENAI_API_KEY в файле openai.env — ключ неверный или не задан."
-        return "Ошибка при генерации. Попробуйте позже или проверьте openai.env."
+        if "timeout" in err_str or "timed out" in err_str:
+            return "Сервис генерации не ответил вовремя (таймаут). Попробуйте ещё раз через минуту."
+        return "Ошибка при генерации. Попробуйте позже."
 
 
 # Пресеты промптов для кнопок «Свой промпт»
@@ -1746,101 +1767,129 @@ PROMPT_PRESETS = {
 def congratulate_callback(update: Update, context: CallbackContext) -> None:
     """Обработка нажатия кнопок «Сгенерировать поздравление», «Свой промпт» и пресетов."""
     query = update.callback_query
-    query.answer()
-    
-    data = (query.data or "").strip()
-    user_id = update.effective_user.id
-    
-    # «Свой промпт» — показываем inline-кнопки (пресеты + свой текст)
-    if data.startswith("congratulate_prompt:"):
-        birthday_id_str = data.split(":", 1)[1]
-        try:
-            birthday_id = int(birthday_id_str)
-        except ValueError:
-            query.message.reply_text("Ошибка: неверные данные.")
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    user_id = update.effective_user.id if update.effective_user else None
+    data = (query.data or "").strip() if query else ""
+
+    def reply(text: str, reply_markup=None) -> None:
+        if chat_id is None:
             return
-        record = database.get_birthday_by_id(birthday_id, user_id)
-        if not record:
-            query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
-            return
-        full_name = record[1]
-        keyboard = [
-            [
-                InlineKeyboardButton("😄 С юмором", callback_data=f"congratulate_custom:{birthday_id}:humor"),
-                InlineKeyboardButton("💝 Трогательное", callback_data=f"congratulate_custom:{birthday_id}:touching"),
-            ],
-            [
-                InlineKeyboardButton("👨‍👩‍👧 Для близкого", callback_data=f"congratulate_custom:{birthday_id}:family"),
-                InlineKeyboardButton("✏️ Свой текст", callback_data=f"congratulate_custom_text:{birthday_id}"),
-            ],
-        ]
-        query.message.reply_text(
-            f"✏️ Выберите стиль поздравления для {full_name} или введите свой промпт:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-    
-    # Пресет: сразу генерируем с выбранным промптом
-    if data.startswith("congratulate_custom:"):
-        parts = data.split(":", 2)
-        if len(parts) < 3:
-            return
-        try:
-            birthday_id = int(parts[1])
-        except ValueError:
-            return
-        preset_key = parts[2]
-        preset_text = PROMPT_PRESETS.get(preset_key)
-        if not preset_text:
-            return
-        record = database.get_birthday_by_id(birthday_id, user_id)
-        if not record:
-            query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
-            return
-        full_name = record[1]
-        query.message.reply_text("⏳ Генерирую поздравление...")
-        text = generate_congratulation(full_name, custom_prompt=preset_text, user_id=user_id)
-        query.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
-        return
-    
-    # «Свой текст» — ждём следующее сообщение пользователя (reply не обязателен)
-    if data.startswith("congratulate_custom_text:"):
-        birthday_id_str = data.split(":", 1)[1]
-        try:
-            birthday_id = int(birthday_id_str)
-        except ValueError:
-            query.message.reply_text("Ошибка: неверные данные.")
-            return
-        record = database.get_birthday_by_id(birthday_id, user_id)
-        if not record:
-            query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
-            return
-        context.bot_data.setdefault("prompt_wait_user", {})[user_id] = (birthday_id, query.message.chat_id)
-        query.message.reply_text(
-            "✏️ Напишите ваш промпт в чат (одним сообщением). Ответ на это сообщение не обязателен."
-        )
-        return
-    
-    if not data.startswith("congratulate:"):
-        return
-    
-    birthday_id_str = data.split(":", 1)[1]
+        context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+
     try:
-        birthday_id = int(birthday_id_str)
-    except ValueError:
-        query.message.reply_text("Ошибка: неверные данные.")
-        return
-    
-    record = database.get_birthday_by_id(birthday_id, user_id)
-    if not record:
-        query.message.reply_text("Запись не найдена или у вас нет доступа к ней.")
-        return
-    
-    full_name = record[1]
-    query.message.reply_text("⏳ Генерирую поздравление...")
-    
-    text = generate_congratulation(full_name, custom_prompt=None, user_id=user_id)
-    query.message.reply_text(f"🎂 Поздравление для {full_name}:\n\n{text}")
+        # Мгновенный feedback в клиенте Telegram (иначе кажется, что кнопка «мёртвая»)
+        try:
+            if data.startswith("congratulate:") or data.startswith("congratulate_custom:"):
+                query.answer(text="Генерирую…")
+            else:
+                query.answer()
+        except Exception as e:
+            logger.warning("callback answer failed user_id=%s: %s", user_id, e)
+
+        logger.info("congratulate callback user_id=%s data=%s", user_id, data[:80])
+
+        if user_id is None or chat_id is None:
+            return
+
+        # «Свой промпт» — показываем inline-кнопки (пресеты + свой текст)
+        if data.startswith("congratulate_prompt:"):
+            birthday_id_str = data.split(":", 1)[1]
+            try:
+                birthday_id = int(birthday_id_str)
+            except ValueError:
+                reply("Ошибка: неверные данные.")
+                return
+            record = database.get_birthday_by_id(birthday_id, user_id)
+            if not record:
+                reply("Запись не найдена или у вас нет доступа к ней.")
+                return
+            full_name = record[1]
+            keyboard = [
+                [
+                    InlineKeyboardButton("😄 С юмором", callback_data=f"congratulate_custom:{birthday_id}:humor"),
+                    InlineKeyboardButton("💝 Трогательное", callback_data=f"congratulate_custom:{birthday_id}:touching"),
+                ],
+                [
+                    InlineKeyboardButton("👨‍👩‍👧 Для близкого", callback_data=f"congratulate_custom:{birthday_id}:family"),
+                    InlineKeyboardButton("✏️ Свой текст", callback_data=f"congratulate_custom_text:{birthday_id}"),
+                ],
+            ]
+            reply(
+                f"✏️ Выберите стиль поздравления для {full_name} или введите свой промпт:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        # Пресет: сразу генерируем с выбранным промптом
+        if data.startswith("congratulate_custom:"):
+            parts = data.split(":", 2)
+            if len(parts) < 3:
+                reply("Ошибка: неверные данные кнопки.")
+                return
+            try:
+                birthday_id = int(parts[1])
+            except ValueError:
+                reply("Ошибка: неверные данные.")
+                return
+            preset_key = parts[2]
+            preset_text = PROMPT_PRESETS.get(preset_key)
+            if not preset_text:
+                reply("Неизвестный стиль. Выберите снова через «Свой промпт».")
+                return
+            record = database.get_birthday_by_id(birthday_id, user_id)
+            if not record:
+                reply("Запись не найдена или у вас нет доступа к ней.")
+                return
+            full_name = record[1]
+            reply("⏳ Генерирую поздравление…")
+            text = generate_congratulation(full_name, custom_prompt=preset_text, user_id=user_id)
+            reply(f"🎂 Поздравление для {full_name}:\n\n{text}")
+            return
+
+        # «Свой текст» — ждём следующее сообщение пользователя (reply не обязателен)
+        if data.startswith("congratulate_custom_text:"):
+            birthday_id_str = data.split(":", 1)[1]
+            try:
+                birthday_id = int(birthday_id_str)
+            except ValueError:
+                reply("Ошибка: неверные данные.")
+                return
+            record = database.get_birthday_by_id(birthday_id, user_id)
+            if not record:
+                reply("Запись не найдена или у вас нет доступа к ней.")
+                return
+            context.bot_data.setdefault("prompt_wait_user", {})[user_id] = (birthday_id, chat_id)
+            reply("✏️ Напишите ваш промпт в чат (одним сообщением).")
+            return
+
+        if not data.startswith("congratulate:"):
+            return
+
+        birthday_id_str = data.split(":", 1)[1]
+        try:
+            birthday_id = int(birthday_id_str)
+        except ValueError:
+            reply("Ошибка: неверные данные.")
+            return
+
+        record = database.get_birthday_by_id(birthday_id, user_id)
+        if not record:
+            reply(
+                "Запись не найдена или у вас нет доступа к ней. "
+                "Если база недавно пересоздавалась — откройте /list и проверьте напоминания снова."
+            )
+            return
+
+        full_name = record[1]
+        reply("⏳ Генерирую поздравление…")
+        text = generate_congratulation(full_name, custom_prompt=None, user_id=user_id)
+        reply(f"🎂 Поздравление для {full_name}:\n\n{text}")
+    except Exception:
+        logger.exception("congratulate_callback failed user_id=%s data=%s", user_id, data[:80])
+        try:
+            reply("Не удалось обработать кнопку. Попробуйте ещё раз или /check.")
+        except Exception:
+            pass
 
 
 class PromptWaitFilter(MessageFilter):
@@ -2163,8 +2212,12 @@ def main() -> None:
     # Inline-меню: Список и Проверить (Добавить/Удалить/Редактировать — в entry_points диалогов ниже)
     dispatcher.add_handler(CallbackQueryHandler(menu_callback, pattern=r'^menu:(list|check)$'))
     
-    # Генерация поздравлений: кнопки под уведомлением и команда /prompt
-    dispatcher.add_handler(CallbackQueryHandler(congratulate_callback, pattern=r'^congratulate'))
+    # Генерация поздравлений: раньше ConversationHandler, чтобы кнопки из уведомлений
+    # не «съедались» активным диалогом /add|/edit
+    dispatcher.add_handler(
+        CallbackQueryHandler(congratulate_callback, pattern=r'^congratulate'),
+        group=-1,
+    )
     dispatcher.add_handler(CommandHandler('prompt', prompt_command))
     dispatcher.add_handler(MessageHandler(PromptWaitFilter(dispatcher), prompt_reply_handler))
     
@@ -2238,14 +2291,31 @@ def main() -> None:
     dispatcher.add_handler(InlineQueryHandler(inline_query))
     logger.info("Inline режим активирован")
     
-    # Останавливаем этот экземпляр при конфликте (уже запущен другой экземпляр с тем же токеном)
-    def on_error(_update: object, context: CallbackContext) -> None:
-        if isinstance(context.error, Conflict):
+    # Логируем любые ошибки и по возможности пишем пользователю
+    def on_error(update: object, context: CallbackContext) -> None:
+        err = context.error
+        if isinstance(err, Conflict):
             logger.critical(
                 "Conflict: уже запущен другой экземпляр бота с этим токеном. "
                 "Остановите все остальные процессы (python/bot.py) и запустите только один."
             )
             updater.stop()
+            return
+        logger.exception("Unhandled error: %s", err)
+        try:
+            chat_id = None
+            if isinstance(update, Update):
+                if update.effective_chat:
+                    chat_id = update.effective_chat.id
+                elif update.callback_query and update.callback_query.message:
+                    chat_id = update.callback_query.message.chat_id
+            if chat_id is not None:
+                context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Произошла ошибка при обработке. Попробуйте ещё раз чуть позже.",
+                )
+        except Exception:
+            pass
 
     dispatcher.add_error_handler(on_error)
 
