@@ -276,7 +276,12 @@ def start(update: Update, context: CallbackContext) -> None:
 
 Начнем? Используйте кнопки ниже или команды.
 """
-    update.message.reply_text(welcome_message, reply_markup=_menu_keyboard())
+    # Reply-клавиатура из незавершённого /add или /edit сохраняется в Telegram
+    # даже после перезапуска бота. Сначала явно убираем её, затем отдельным
+    # сообщением показываем inline-меню: совместить оба reply_markup в одном
+    # сообщении Telegram Bot API не позволяет.
+    update.message.reply_text(welcome_message, reply_markup=ReplyKeyboardRemove())
+    update.message.reply_text("Управление:", reply_markup=_menu_keyboard())
     logger.info("Пользователь user_id=%s запустил бота", user.id)
 
 
