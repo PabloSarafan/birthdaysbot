@@ -153,7 +153,65 @@ def _parse_remind_days(text: str):
 
 
 REMIND_DAY_OPTIONS = (0, 1, 3, 7)
-DATE_LIKE_RE = re.compile(r"^\d{1,2}\.\d{1,2}(\.\d{2,4})?$")
+UNKNOWN_DATE_YEAR = 4  # служебный високосный год для дат без указанного года
+
+RUSSIAN_MONTHS = {
+    "январь": 1, "января": 1, "янв": 1,
+    "февраль": 2, "февраля": 2, "фев": 2,
+    "март": 3, "марта": 3, "мар": 3,
+    "апрель": 4, "апреля": 4, "апр": 4,
+    "май": 5, "мая": 5,
+    "июнь": 6, "июня": 6, "июн": 6,
+    "июль": 7, "июля": 7, "июл": 7,
+    "август": 8, "августа": 8, "авг": 8,
+    "сентябрь": 9, "сентября": 9, "сент": 9, "сен": 9,
+    "октябрь": 10, "октября": 10, "окт": 10,
+    "ноябрь": 11, "ноября": 11, "ноя": 11,
+    "декабрь": 12, "декабря": 12, "дек": 12,
+}
+
+
+def _parse_user_date(value: str) -> Tuple[date, bool]:
+    """Разобрать ДД.ММ[.ГГГГ] или русскую дату вроде «3 сентября 2002»."""
+    text = " ".join((value or "").strip().lower().replace("ё", "е").split())
+
+    numeric = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?", text)
+    if numeric:
+        day, month = int(numeric.group(1)), int(numeric.group(2))
+        year_text = numeric.group(3)
+    else:
+        words = re.fullmatch(r"(\d{1,2})\s+([а-я]+)\.?(?:\s+(\d{4}))?", text)
+        if not words:
+            raise ValueError("unsupported date format")
+        day = int(words.group(1))
+        month = RUSSIAN_MONTHS.get(words.group(2))
+        if month is None:
+            raise ValueError("unknown month")
+        year_text = words.group(3)
+
+    has_year = year_text is not None
+    year = int(year_text) if has_year else UNKNOWN_DATE_YEAR
+    return date(year, month, day), has_year
+
+
+def _date_to_storage(value: date) -> str:
+    """ISO-дата с четырёхзначным годом, включая служебный год 0004."""
+    return f"{value.year:04d}-{value.month:02d}-{value.day:02d}"
+
+
+def _format_date_for_user(value: date) -> str:
+    """Не показывать пользователю служебный год у ежегодной даты."""
+    if value.year <= 1900:
+        return value.strftime('%d.%m')
+    return value.strftime('%d.%m.%Y')
+
+
+def _looks_like_supported_date(value: str) -> bool:
+    try:
+        _parse_user_date(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _consume_update_once(update: Update, context: CallbackContext) -> bool:
@@ -491,8 +549,8 @@ def add_event_name(update: Update, context: CallbackContext) -> int:
     update.message.reply_text(
         f"✅ Название: {event_name}\n\n"
         "Теперь введите дату:\n"
-        "• В формате ДД.ММ (например: 01.01 для Нового Года)\n"
-        "• Или ДД.ММ.ГГГГ (если хотите указать конкретный год)\n\n"
+        "• ДД.ММ или ДД.ММ.ГГГГ\n"
+        "• Текстом, например: 1 января или 1 января 2027\n\n"
         "Отменить: /cancel"
     )
     return WAITING_DATE
@@ -511,8 +569,10 @@ def add_name(update: Update, context: CallbackContext) -> int:
     context.user_data['full_name'] = full_name
     update.message.reply_text(
         f"✅ ФИО: {full_name}\n\n"
-        "Теперь введите дату рождения в формате ДД.ММ.ГГГГ\n"
-        "Например: 15.03.1990\n\n"
+        "Теперь введите дату рождения. Поддерживаются форматы:\n"
+        "• 15.03.1990\n"
+        "• 15.03 (если год неизвестен)\n"
+        "• 15 марта или 15 марта 1990\n\n"
         "Отменить: /cancel"
     )
     return WAITING_DATE
@@ -526,61 +586,34 @@ def add_date(update: Update, context: CallbackContext) -> int:
     date_str = (update.message.text or "").strip()
     event_type = context.user_data.get('event_type', 'birthday')
 
-    # Не дата (например ФИО, если update пришёл повторно) — мягкая подсказка, не «неверный формат»
-    if not DATE_LIKE_RE.match(date_str):
-        if event_type in ['holiday', 'other']:
-            update.message.reply_text(
-                "Введите дату в формате ДД.ММ (например: 01.01) или ДД.ММ.ГГГГ.\n\n"
-                "Отменить: /cancel"
-            )
-        else:
-            update.message.reply_text(
-                "Введите дату рождения в формате ДД.ММ.ГГГГ (например: 15.03.1990).\n\n"
-                "Отменить: /cancel"
-            )
-        return WAITING_DATE
-    
-    birth_date = None
-    formatted_date = date_str
-    
     try:
-        # Для праздников и других событий поддерживаем формат ДД.ММ
-        if event_type in ['holiday', 'other']:
-            try:
-                temp_date = datetime.strptime(date_str, '%d.%m')
-                birth_date = date(1900, temp_date.month, temp_date.day)
-                formatted_date = date_str
-            except ValueError:
-                birth_date = datetime.strptime(date_str, '%d.%m.%Y').date()
-                formatted_date = date_str
-        else:
-            birth_date = datetime.strptime(date_str, '%d.%m.%Y').date()
-            formatted_date = date_str
+        birth_date, has_year = _parse_user_date(date_str)
+        formatted_date = _format_date_for_user(birth_date)
         
-        if event_type == 'birthday' and birth_date > date.today():
+        if event_type == 'birthday' and has_year and birth_date > date.today():
             update.message.reply_text(
                 "❌ Дата рождения не может быть в будущем.\n"
                 "Введите корректную дату:"
             )
             return WAITING_DATE
         
-        context.user_data['birth_date'] = birth_date.strftime('%Y-%m-%d')
+        context.user_data['birth_date'] = _date_to_storage(birth_date)
         context.user_data['formatted_date'] = formatted_date
         
         if event_type == 'birthday':
-            return _ask_remind_days(update, context, date_str)
+            return _ask_remind_days(update, context, formatted_date)
         else:
             full_name = context.user_data.get('full_name')
             event_name = context.user_data.get('event_name')
             user_id = update.effective_user.id
             
-            if database.add_birthday(user_id, full_name, birth_date.strftime('%Y-%m-%d'), 
+            if database.add_birthday(user_id, full_name, _date_to_storage(birth_date),
                                     None, event_type, event_name, database.DEFAULT_REMIND_DAYS):
                 event_emoji = "🎊" if event_type == 'holiday' else "📅"
                 update.message.reply_text(
                     f"✅ Успешно сохранено!\n\n"
                     f"{event_emoji} {event_name}\n"
-                    f"📅 {date_str}\n\n"
+                    f"📅 {formatted_date}\n\n"
                     f"Напоминания: за 0, 1, 3 и 7 дней до события (можно изменить в /edit)."
                 )
                 logger.info("Добавлено событие user_id=%s type=%s", user_id, event_type)
@@ -591,18 +624,12 @@ def add_date(update: Update, context: CallbackContext) -> int:
             return ConversationHandler.END
         
     except ValueError:
-        if event_type in ['holiday', 'other']:
-            update.message.reply_text(
-                "❌ Неверный формат даты.\n"
-                "Используйте формат ДД.ММ (например: 01.01) или ДД.ММ.ГГГГ\n"
-                "Попробуйте еще раз:"
-            )
-        else:
-            update.message.reply_text(
-                "❌ Неверный формат даты.\n"
-                "Используйте формат ДД.ММ.ГГГГ (например: 15.03.1990)\n"
-                "Попробуйте еще раз:"
-            )
+        update.message.reply_text(
+            "❌ Не удалось распознать дату.\n"
+            "Введите, например: 03.09, 03.09.2002, 3 сентября "
+            "или 3 сентября 2002.\n"
+            "Попробуйте ещё раз:"
+        )
         return WAITING_DATE
 
 
@@ -621,7 +648,7 @@ def add_remind_days(update: Update, context: CallbackContext) -> int:
         return _ask_telegram_contact(update, context)
 
     # Повтор той же даты / не числа — не переходим к контакту
-    if DATE_LIKE_RE.match(text):
+    if _looks_like_supported_date(text):
         update.message.reply_text(
             "Выберите дни напоминаний кнопками ниже, затем «Готово», или «Пропустить».",
             reply_markup=markup,
@@ -819,7 +846,7 @@ def list_birthdays(update: Update, context: CallbackContext) -> None:
         
         # Вычисляем возраст для дней рождения
         age = None
-        if event_type == 'birthday' and birth_date_obj.year != 1900:
+        if event_type == 'birthday' and birth_date_obj.year > 1900:
             next_birthday_year = today.year if birth_date_obj.replace(year=today.year) >= today else today.year + 1
             age = next_birthday_year - birth_date_obj.year
         
@@ -851,10 +878,7 @@ def list_birthdays(update: Update, context: CallbackContext) -> None:
                 name_display += f" (@{telegram_username})"
         
         # Форматируем дату
-        if event_type == 'birthday':
-            formatted_date = birth_date.strftime('%d.%m.%Y')
-        else:
-            formatted_date = birth_date.strftime('%d.%m')
+        formatted_date = _format_date_for_user(birth_date)
         
         # Текст о днях до события
         if days_until == 0:
@@ -887,7 +911,7 @@ def _build_delete_list_message(birthdays):
             emoji, formatted_date = "📅", birth_date_obj.strftime('%d.%m')
             display_name = event_name if event_name else full_name
         else:
-            emoji, formatted_date = "🎂", birth_date_obj.strftime('%d.%m.%Y')
+            emoji, formatted_date = "🎂", _format_date_for_user(birth_date_obj.date())
             display_name = full_name + (f" (@{telegram_username})" if telegram_username else "")
         message += f"{idx}. {emoji} {display_name} - {formatted_date}\n"
     message += "\nВведите номер записи или /cancel для отмены:"
@@ -960,7 +984,7 @@ def _build_edit_list_message(birthdays):
             emoji, formatted_date = "📅", birth_date_obj.strftime('%d.%m')
             display_name = event_name if event_name else full_name
         else:
-            emoji, formatted_date = "🎂", birth_date_obj.strftime('%d.%m.%Y')
+            emoji, formatted_date = "🎂", _format_date_for_user(birth_date_obj.date())
             display_name = full_name + (f" (@{telegram_username})" if telegram_username else "")
         message += f"{idx}. {emoji} {display_name} - {formatted_date}\n"
     message += "\nВведите номер записи или /cancel для отмены:"
@@ -1049,17 +1073,11 @@ def edit_name(update: Update, context: CallbackContext) -> int:
     old_date = context.user_data.get('old_date')
     old_date_obj = datetime.strptime(old_date, '%Y-%m-%d')
     
-    # Формат даты зависит от типа события
-    if event_type in ['holiday', 'other']:
-        formatted_date = old_date_obj.strftime('%d.%m')
-    else:
-        formatted_date = old_date_obj.strftime('%d.%m.%Y')
-    
-    # Подсказка зависит от типа события
-    if event_type in ['holiday', 'other']:
-        date_hint = "Введите новую дату в формате ДД.ММ или ДД.ММ.ГГГГ"
-    else:
-        date_hint = "Введите новую дату в формате ДД.ММ.ГГГГ"
+    formatted_date = _format_date_for_user(old_date_obj.date())
+    date_hint = (
+        "Введите новую дату: ДД.ММ, ДД.ММ.ГГГГ, "
+        "«3 сентября» или «3 сентября 2002»"
+    )
     
     update.message.reply_text(
         f"✅ Новое название: {new_name_input}\n\n"
@@ -1074,40 +1092,23 @@ def edit_date(update: Update, context: CallbackContext) -> int:
     date_str = update.message.text.strip()
     event_type = context.user_data.get('old_event_type', 'birthday')
     
-    # Валидация формата даты
-    birth_date = None
-    formatted_date = date_str
-    
     try:
-        # Для праздников и других событий поддерживаем формат ДД.ММ
-        if event_type in ['holiday', 'other']:
-            # Пробуем сначала формат ДД.ММ
-            try:
-                temp_date = datetime.strptime(date_str, '%d.%m')
-                birth_date = date(1900, temp_date.month, temp_date.day)
-                formatted_date = date_str
-            except ValueError:
-                # Пробуем формат ДД.ММ.ГГГГ
-                birth_date = datetime.strptime(date_str, '%d.%m.%Y').date()
-                formatted_date = date_str
-        else:
-            # Для дней рождения только ДД.ММ.ГГГГ
-            birth_date = datetime.strptime(date_str, '%d.%m.%Y').date()
-            formatted_date = date_str
+        birth_date, has_year = _parse_user_date(date_str)
+        formatted_date = _format_date_for_user(birth_date)
         
         # Проверка что дата не в будущем (только для дней рождения)
-        if event_type == 'birthday' and birth_date > date.today():
+        if event_type == 'birthday' and has_year and birth_date > date.today():
             update.message.reply_text("❌ Дата рождения не может быть в будущем. Попробуйте еще раз:")
             return WAITING_EDIT_DATE
         
-        context.user_data['new_date'] = birth_date.strftime('%Y-%m-%d')
+        context.user_data['new_date'] = _date_to_storage(birth_date)
         context.user_data['formatted_date'] = formatted_date
         
         # Для дня рождения спрашиваем дни напоминаний, затем username; для остальных — сохраняем сразу
         if event_type == 'birthday':
             old_remind = context.user_data.get('old_remind_days') or database.DEFAULT_REMIND_DAYS
             update.message.reply_text(
-                f"✅ Дата: {date_str}\n\n"
+                f"✅ Дата: {formatted_date}\n\n"
                 f"Текущие дни напоминаний: {old_remind} (0 = в день события)\n\n"
                 f"Введите новые значения через запятую (например 0,1,3,7) или /skip чтобы не менять:\n\n"
                 f"Отменить: /cancel"
@@ -1121,13 +1122,13 @@ def edit_date(update: Update, context: CallbackContext) -> int:
             old_remind = context.user_data.get('old_remind_days') or database.DEFAULT_REMIND_DAYS
             user_id = update.effective_user.id
             
-            if database.update_birthday(birthday_id, user_id, new_name, birth_date.strftime('%Y-%m-%d'), 
+            if database.update_birthday(birthday_id, user_id, new_name, _date_to_storage(birth_date),
                                        None, event_type, new_event_name, old_remind):
                 event_emoji = "🎊" if event_type == 'holiday' else "📅"
                 update.message.reply_text(
                     f"✅ Запись обновлена!\n\n"
                     f"{event_emoji} {new_event_name}\n"
-                    f"📅 {date_str}"
+                    f"📅 {formatted_date}"
                 )
                 logger.info("Обновлено событие user_id=%s id=%s type=%s", user_id, birthday_id, event_type)
             else:
@@ -1137,16 +1138,10 @@ def edit_date(update: Update, context: CallbackContext) -> int:
             return ConversationHandler.END
         
     except ValueError:
-        if event_type in ['holiday', 'other']:
-            update.message.reply_text(
-                "❌ Неверный формат даты.\n"
-                "Используйте формат ДД.ММ (например: 01.01) или ДД.ММ.ГГГГ:"
-            )
-        else:
-            update.message.reply_text(
-                "❌ Неверный формат даты.\n"
-                "Используйте формат ДД.ММ.ГГГГ (например: 15.03.1990):"
-            )
+        update.message.reply_text(
+            "❌ Не удалось распознать дату. Введите, например: 03.09, "
+            "03.09.2002, 3 сентября или 3 сентября 2002:"
+        )
         return WAITING_EDIT_DATE
 
 
@@ -2050,10 +2045,7 @@ def inline_query(update: Update, context: CallbackContext) -> None:
         
         # Форматируем дату
         birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
-        if event_type == 'birthday':
-            formatted_date = birth_date_obj.strftime('%d.%m.%Y')
-        else:
-            formatted_date = birth_date_obj.strftime('%d.%m')
+        formatted_date = _format_date_for_user(birth_date_obj.date())
         
         # Определяем эмодзи
         if event_type == 'holiday':

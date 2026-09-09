@@ -119,7 +119,11 @@ def check_and_send_notifications(bot, user_id: int = None):
                 try:
                     # Форматируем дату для отображения
                     birth_date_obj = datetime.strptime(birth_date, '%Y-%m-%d')
-                    formatted_date = birth_date_obj.strftime('%d.%m.%Y')
+                    formatted_date = (
+                        birth_date_obj.strftime('%d.%m')
+                        if birth_date_obj.year <= 1900
+                        else birth_date_obj.strftime('%d.%m.%Y')
+                    )
                     
                     # Формируем имя с username (только для дней рождения)
                     name_with_username = f"{full_name} (@{telegram_username})" if telegram_username else full_name
